@@ -1,0 +1,52 @@
+/**
+ * api.js - fetch 封装
+ */
+const API = (function() {
+    async function request(url, options = {}) {
+        options.credentials = 'include';
+        if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+            options.headers = Object.assign({'Content-Type': 'application/json'}, options.headers || {});
+            options.body = JSON.stringify(options.body);
+        }
+        try {
+            const resp = await fetch(url, options);
+            const text = await resp.text();
+            let data;
+            try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+            if (!resp.ok) {
+                const err = new Error((data && data.message) || data || ('HTTP ' + resp.status));
+                err.status = resp.status;
+                err.data = data;
+                throw err;
+            }
+            return data;
+        } catch (e) {
+            throw e;
+        }
+    }
+
+    return {
+        login: (username, password) => request('/api/login', { method: 'POST', body: { username, password } }),
+        logout: () => request('/api/logout', { method: 'POST' }),
+        currentUser: () => request('/api/current_user'),
+
+        // 用户任务
+        userTasks: () => request('/api/user/tasks'),
+        unitStatus: (taskId, groupId) => request('/api/user/unit_status?task_id=' + encodeURIComponent(taskId) + '&group_id=' + encodeURIComponent(groupId)),
+        getUnit: (taskId, groupId, unitId) => request('/api/unit/' + encodeURIComponent(taskId) + '/' + encodeURIComponent(groupId) + '/' + unitId),
+        submitUnit: (taskId, groupId, unitId, payload) => request('/api/unit/' + encodeURIComponent(taskId) + '/' + encodeURIComponent(groupId) + '/' + unitId + '/submit', { method: 'POST', body: payload }),
+
+        // 管理员
+        adminDatasets: () => request('/api/admin/datasets'),
+        adminAnalyzeDataset: (name) => request('/api/admin/dataset/' + encodeURIComponent(name) + '/analyze'),
+        adminTasks: () => request('/api/admin/tasks'),
+        adminCreateTask: (payload) => request('/api/admin/create_task', { method: 'POST', body: payload }),
+        adminDownloadUrl: (taskId) => '/api/admin/task/' + encodeURIComponent(taskId) + '/download_accounts',
+        adminTaskDetail: (taskId) => request('/api/admin/task/' + encodeURIComponent(taskId) + '/detail'),
+        adminDeleteTask: (taskId) => request('/api/admin/task/' + encodeURIComponent(taskId) + '/delete', { method: 'POST' }),
+
+        // POI 任务
+        getPoiUnit: (taskId, groupId, unitId) => request('/api/poi_unit/' + encodeURIComponent(taskId) + '/' + encodeURIComponent(groupId) + '/' + unitId),
+        submitPoiUnit: (taskId, groupId, unitId, payload) => request('/api/poi_unit/' + encodeURIComponent(taskId) + '/' + encodeURIComponent(groupId) + '/' + unitId + '/submit', { method: 'POST', body: payload }),
+    };
+})();
