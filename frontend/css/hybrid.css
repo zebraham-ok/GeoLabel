@@ -1,0 +1,162 @@
+/* ============ Hybrid 页面特化样式 ============ */
+
+/* -- 底栏 Phase 1（是/否）-- */
+.hybrid-phase1-col .user-bb-bigbtns {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px;
+}
+
+/* -- 底栏 Phase 2（园区类型 4x2）-- */
+.hybrid-phase2-col .user-bb-bigbtns {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+}
+
+/* -- 运输方式 2x2 -- */
+.hybrid-trans-col .user-bb-bigbtns {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px;
+}
+
+/* -- 操作栏 -- */
+.poi-action-col .user-bb-bigbtns {
+    grid-template-columns: 1fr;
+    gap: 4px;
+}
+.poi-action-col .user-bb-actions {
+    margin-top: 5px;
+    grid-template-columns: repeat(2, 1fr);
+}
+
+/* -- 底栏 Phase 1 布局（2栏：是/否 + 操作）-- */
+.user-bb-cols.hybrid-phase1-layout {
+    grid-template-columns: minmax(180px, 0.6fr) minmax(130px, 0.4fr);
+}
+/* -- 底栏 Phase 2 布局（3栏：类型 + 运输 + 操作）-- */
+.user-bb-cols.hybrid-phase2-layout {
+    grid-template-columns: minmax(320px, 2fr) minmax(180px, 1fr) minmax(140px, 0.8fr);
+}
+
+/* ============ 多边形绘制画布（复用 POI） ============ */
+#polyCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 10;
+    cursor: crosshair;
+    pointer-events: auto;
+}
+/* ============ mask / bbox 画布（Phase 1 高亮+红框效果） ============ */
+#user-maskCanvas, #user-bboxCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    z-index: 5;
+}
+#user-bboxCanvas {
+    z-index: 6;
+}
+#user-imgWrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+#user-mainImg {
+    display: block;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* ============ 多边形工具栏（在顶栏中） ============ */
+.user-topbar-tool {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+.poi-toolbar-label {
+    color: #888;
+    font-size: 10px;
+    white-space: nowrap;
+}
+.poi-toolbar-active-label {
+    color: #e94560;
+    font-weight: bold;
+    font-size: 11px;
+    min-width: 60px;
+    white-space: nowrap;
+}
+.poi-toolbar-count {
+    color: #4ecca3;
+    font-size: 10px;
+    min-width: 40px;
+    white-space: nowrap;
+}
+.poi-toolbar-hint {
+    color: #666;
+    font-size: 9px;
+    white-space: nowrap;
+}
+.poi-tool-btn {
+    padding: 2px 7px;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 3px;
+    color: #aaa;
+    font-size: 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+.poi-tool-btn:hover {
+    border-color: #4ecca3;
+    color: #fff;
+    background: #225544;
+}
+.poi-tool-btn-danger:hover {
+    border-color: #ef5350;
+    background: #552222;
+}
+
+/* ============ 图片面板 ============ */
+.user-img-panel {
+}
+
+/* ============ 图片加载覆盖层 ============ */
+.img-loading-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    pointer-events: all;
+    transition: opacity 0.15s;
+}
+.img-loading-overlay.hidden {
+    display: none;
+}
+.img-loading-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    border-top-color: #4ecca3;
+    border-radius: 50%;
+    animation: img-loading-spin 0.6s linear infinite;
+}
+@keyframes img-loading-spin {
+    to { transform: rotate(360deg); }
+}
+.img-loading-text {
+    color: #aaa;
+    font-size: 12px;
+}

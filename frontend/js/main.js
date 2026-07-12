@@ -68,6 +68,11 @@
         window.location.href = '/poi';
         return;
     }
+    // Hybrid 任务用户自动跳转到 Hybrid 页面
+    if (tasks.length > 0 && tasks[0].task_type === 'hybrid') {
+        window.location.href = '/hybrid';
+        return;
+    }
 
     const curTask = tasks[0];
     document.getElementById('user-taskHeader').textContent =

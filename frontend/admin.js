@@ -194,6 +194,7 @@
                 dataset: document.getElementById('admin-task-dataset').value,
                 num_groups: parseInt(document.getElementById('admin-num-groups').value) || 1,
                 overlap_factor: parseInt(document.getElementById('admin-overlap').value) || 1,
+                task_type: document.getElementById('admin-task-type').value,
             };
             if (!payload.task_name || !payload.dataset) {
                 toast('请填写任务名称和 dataset');
@@ -240,7 +241,9 @@
         `).join('');
         const taskTypeLabel = task.task_type === 'poi'
             ? '<span style="color:#ffa726">[POI]</span>'
-            : '<span style="color:#4ecca3">[判读]</span>';
+            : (task.task_type === 'hybrid'
+                ? '<span style="color:#e94560">[Hybrid]</span>'
+                : '<span style="color:#4ecca3">[判读]</span>');
         const html = `
             <p style="color:#4ecca3;margin-bottom:10px">✓ 任务已创建（${task.task_id}）${taskTypeLabel}</p>
             <p style="color:#888;margin-bottom:10px;font-size:11px">总 unit: ${task.total_units} · 组数: ${task.num_groups} · 重叠: ${task.overlap_factor}</p>
@@ -287,7 +290,9 @@
             tbody.innerHTML = tasks.map(t => {
                 const typeBadge = t.task_type === 'poi'
                     ? '<span style="color:#ffa726;font-size:9px">[POI]</span>'
-                    : '<span style="color:#4ecca3;font-size:9px">[判读]</span>';
+                    : (t.task_type === 'hybrid'
+                        ? '<span style="color:#e94560;font-size:9px">[Hybrid]</span>'
+                        : '<span style="color:#4ecca3;font-size:9px">[判读]</span>');
                 return `
                 <tr>
                     <td><a class="admin-task-link" data-taskid="${t.task_id}" href="#">${t.task_name}</a> ${typeBadge}</td>

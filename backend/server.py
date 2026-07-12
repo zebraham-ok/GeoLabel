@@ -519,6 +519,20 @@ def poi_page():
     return html
 
 
+@app.route("/hybrid")
+def hybrid_page():
+    """Hybrid 任务页面（判读+POI 两步标注）"""
+    amap = _get_active_amap_key()
+    html_path = FRONTEND_DIR / "hybrid.html"
+    if not html_path.exists():
+        return "Hybrid 页面不存在", 404
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{ AMAP_KEY }}", amap["key"])
+    html = html.replace("{{ AMAP_SECURITY_CODE }}", amap["security_code"])
+    return html
+
+
 @app.route("/admin")
 def admin_page():
     return send_file(str(FRONTEND_DIR / "admin.html"))
@@ -639,11 +653,19 @@ def get_unit_status():
                 ann = json.load(fp)
             unit_id = ann.get("unit_id")
             if unit_id is not None:
-                status[str(unit_id)] = {
+                st = {
                     "done": True,
                     "result": ann.get("result"),
                     "updated_at": ann.get("updated_at"),
                 }
+                # hybrid 模式附加信息
+                if ann.get("has_park") is not None:
+                    st["has_park"] = ann["has_park"]
+                    polys = ann.get("polygons", [])
+                    st["polygon_count"] = len(polys)
+                    st["poi_labels"] = list(set(p["label"] for p in polys if p.get("label")))
+                    st["transport_modes"] = ann.get("transport_modes", [])
+                status[str(unit_id)] = st
     status_cache.set(cache_key, status)
     return jsonify(status)
 
@@ -737,13 +759,17 @@ def get_unit(task_id, group_id, unit_id):
         annotation_cache.set(anno_cache_key, existing)
 
     task_type = task.get("task_type", "judge")
-    if task_type == "judge_shp":
+    if task_type in ("judge_shp", "hybrid"):
+        # hybrid: 返回 mask_url 用于 Phase 1 的高亮区域+bbox 展示
         # judge_shp: 无 mask，返回多边形数据用于前端渲染
+        mask_url = None
+        if task_type == "hybrid" and unit.get("image"):
+            mask_url = f"/api/mask/{quote(unit['image'])}?dataset={task['dataset']}"
         return jsonify({
             "unit": unit,
             "image_url": f"/api/image/{quote(unit['image'])}?dataset={task['dataset']}",
-            "mask_url": None,
-            "task_type": "judge_shp",
+            "mask_url": mask_url,
+            "task_type": task_type,
             "polygon_pixels": unit.get("polygon_pixels"),
             "existing_annotation": existing,
         })
@@ -774,17 +800,34 @@ def submit_unit(task_id, group_id, unit_id):
         return jsonify({"error": "无权访问"}), 403
 
     data = request.get_json() or {}
-    record = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "unit_id": unit_id,
-        "username": username,
-        "result": data.get("result"),                # 标注结果（如 "是"/"否"/"不确定"）
-        "park_type": data.get("park_type"),           # 园区类型
-        "transport_modes": data.get("transport_modes", []),  # 运输方式列表
-        "comment": data.get("comment", ""),
-        "updated_at": datetime.now().isoformat(),
-    }
+    task_type = task.get("task_type", "judge")
+
+    if task_type == "hybrid":
+        # hybrid 模式：两步标注
+        record = {
+            "task_id": task_id,
+            "group_id": group_id,
+            "unit_id": unit_id,
+            "username": username,
+            "has_park": data.get("has_park"),              # True/False
+            "result": data.get("result", "否"),            # "是"/"否"
+            "polygons": data.get("polygons", []),          # [{label, points: [[pctx,pcty],...]}]
+            "transport_modes": data.get("transport_modes", []),
+            "comment": data.get("comment", ""),
+            "updated_at": datetime.now().isoformat(),
+        }
+    else:
+        record = {
+            "task_id": task_id,
+            "group_id": group_id,
+            "unit_id": unit_id,
+            "username": username,
+            "result": data.get("result"),                # 标注结果（如 "是"/"否"/"不确定"）
+            "park_type": data.get("park_type"),           # 园区类型
+            "transport_modes": data.get("transport_modes", []),  # 运输方式列表
+            "comment": data.get("comment", ""),
+            "updated_at": datetime.now().isoformat(),
+        }
     out_dir = ANNOTATIONS_DIR / task_id / group_id
     out_dir.mkdir(parents=True, exist_ok=True)
     save_json(out_dir / f"unit_{unit_id:06d}.json", record)
@@ -1162,9 +1205,10 @@ def admin_create_task():
       "task_name": "xxx",
       "dataset": "test",
       "num_groups": 3,
-      "overlap_factor": 2        # 1=不重叠, 2=每图被2组标 (POI 任务忽略)
+      "overlap_factor": 2,       # 1=不重叠, 2=每图被2组标
+      "task_type": "hybrid"      # 可选: "auto"/"judge"/"poi"/"hybrid"，默认 "auto" 自动检测
     }
-    系统根据 dataset 所在目录自动判定 task_type: "judge" 或 "poi"
+    系统根据 dataset 所在目录自动判定 task_type，也可手动指定为 hybrid
     """
     if session.get("role") != "admin":
         return jsonify({"error": "无权限"}), 403
@@ -1173,6 +1217,7 @@ def admin_create_task():
     dataset = (data.get("dataset") or "").strip()
     num_groups = int(data.get("num_groups") or 1)
     overlap_factor = int(data.get("overlap_factor") or 1)
+    req_task_type = (data.get("task_type") or "auto").strip()
 
     if not task_name or not dataset:
         return jsonify({"error": "缺少 task_name 或 dataset"}), 400
@@ -1182,6 +1227,12 @@ def admin_create_task():
     ds_type = _detect_dataset_type(dataset)
     if ds_type is None:
         return jsonify({"error": f"dataset {dataset} 不存在"}), 404
+
+    # 如果手动指定了 task_type 为 hybrid，且数据集是 judge 类型，则覆盖
+    if req_task_type == "hybrid" and ds_type in ("judge_mask", "judge_shp", "judge"):
+        ds_type = "hybrid"
+    elif req_task_type == "hybrid":
+        return jsonify({"error": "hybrid 模式仅支持判读数据集（datasets_judge）"}), 400
 
     # ===== judge_mask 任务：mask 连通集分析 =====
     if ds_type in ("judge_mask", "judge"):
@@ -1200,7 +1251,7 @@ def admin_create_task():
 
             info = analyze_connected_components(mask_file)
             for comp in info.get("components", []):
-                all_units.append({
+                unit_data = {
                     "id": len(all_units) + 1,
                     "image": mask_file.name,
                     "lat": lat,
@@ -1209,12 +1260,16 @@ def admin_create_task():
                     "bbox": comp["bbox"],
                     "area": comp["area"],
                     "centroid": comp["centroid"],
-                })
+                }
+                # hybrid 模式需要存储轮廓多边形
+                if ds_type == "hybrid":
+                    unit_data["polygon_pixels"] = comp.get("contour", [])
+                all_units.append(unit_data)
 
         groups_units = distribute_units_with_overlap(all_units, num_groups, overlap_factor)
 
-    # ===== judge_shp 任务：从 COCO JSON 加载多边形 =====
-    elif ds_type == "judge_shp":
+    # ===== judge_shp / hybrid 任务：从 COCO JSON 加载多边形 =====
+    elif ds_type in ("judge_shp", "hybrid"):
         if overlap_factor < 1 or overlap_factor > num_groups:
             return jsonify({"error": "重叠系数非法"}), 400
 
@@ -1369,6 +1424,7 @@ def admin_task_detail(task_id):
     # ---- 交叉标注一致性分析 ----
     # key = "image文件名|component_id" → 跨组匹配
     unit_ann_map: Dict[str, list] = {}
+    task_type = task.get("task_type", "judge")
 
     for group in task["groups"]:
         gid = group["group_id"]
@@ -1379,14 +1435,20 @@ def admin_task_detail(task_id):
             with open(ann_file, "r", encoding="utf-8") as fp:
                 ann = json.load(fp)
             unit_id = ann.get("unit_id")
-            result = ann.get("result", "")
+
+            # hybrid 模式：用 has_park 判断 result
+            if task_type == "hybrid":
+                result = "是" if ann.get("has_park") else "否"
+            else:
+                result = ann.get("result", "")
+
             if not result:
                 continue
             # 找到该 unit 的 image + component_id
             unit_info = next((u for u in group.get("units", []) if u["id"] == unit_id), None)
             if not unit_info:
                 continue
-            # POI unit 没有 component_id，用 id 替代
+            # POI / hybrid unit 没有 component_id，用 id 替代
             comp_id = unit_info.get('component_id', unit_info['id'])
             key = f"{unit_info['image']}|{comp_id}"
             if key not in unit_ann_map:
@@ -1396,7 +1458,9 @@ def admin_task_detail(task_id):
                 "unit_id": unit_id,
                 "result": result,
                 "park_type": ann.get("park_type", ""),
-                "transport_modes": ann.get("transport_modes", [])
+                "transport_modes": ann.get("transport_modes", []),
+                "has_park": ann.get("has_park") if task_type == "hybrid" else None,
+                "polygons": ann.get("polygons", []) if task_type == "hybrid" else None,
             })
 
     total_overlap = 0   # 被 ≥2 组标注的 unit 数

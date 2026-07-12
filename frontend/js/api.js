@@ -14,7 +14,10 @@ const API = (function() {
             let data;
             try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
             if (!resp.ok) {
-                const err = new Error((data && data.message) || data || ('HTTP ' + resp.status));
+                const msg = (data && (data.error || data.message))
+                    || (typeof data === 'string' ? data : null)
+                    || ('HTTP ' + resp.status);
+                const err = new Error(msg);
                 err.status = resp.status;
                 err.data = data;
                 throw err;

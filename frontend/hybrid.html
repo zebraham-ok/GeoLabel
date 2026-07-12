@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>物流园区 Hybrid 判读</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/hybrid.css">
+<script>window._AMapSecurityConfig={securityJsCode:'{{ AMAP_SECURITY_CODE }}'}</script>
+<script src="https://webapi.amap.com/maps?v=2.0&key={{ AMAP_KEY }}&plugin=AMap.ToolBar,AMap.Scale,AMap.MapType,AMap.PlaceSearch"></script>
+</head>
+<body>
+
+<!-- ========== 加载覆盖层 ========== -->
+<div id="user-loading">
+    <div>加载中...</div>
+    <div id="user-loadStatus" style="font-size:10px;color:#666"></div>
+</div>
+<div id="user-toast"></div>
+
+<!-- ========== 顶栏 ========== -->
+<div class="user-topbar">
+    <h1>Hybrid 判读</h1>
+    <div class="user-sep"></div>
+    <div class="user-counter" id="user-counter">-</div>
+    <div class="user-tname" id="user-tname">-</div>
+    <span class="user-user-tag" id="user-username">未登录</span>
+    <span class="user-role-tag" id="user-role"></span>
+    <div class="user-topbar-tool">
+        <span class="poi-toolbar-label">当前标签:</span>
+        <span class="poi-toolbar-active-label" id="poiToolbarActiveLabel">未选择</span>
+        <span class="poi-toolbar-count" id="poiToolbarCount">0 个框</span>
+        <span class="poi-toolbar-hint" id="poiToolbarHint">请先判断图中是否有物流园区</span>
+        <button class="poi-tool-btn" id="poiUndoBtn" title="撤销最后一个点或多边形">↩ 撤销</button>
+        <button class="poi-tool-btn poi-tool-btn-danger" id="poiDelPolyBtn" title="删除选中的多边形">✕ 删除选中</button>
+    </div>
+    <span class="user-help-btn" id="user-helpBtn">&#x2753;
+        <div class="user-help-tip">
+            <b>物流园区 Hybrid 判读系统</b><br>
+            <b>两步判读：</b><br>
+            Step 1: 观察高亮区域，判断图中是否有物流园区（是/否）<br>
+            高亮区域 = AI 预识别 mask 叠加层<br>
+            红框 = AI 预识别 bbox<br>
+            Step 2（选"是"后）: 高亮消失，需手动绘制多边形<br>
+            点击选中后选择园区类型和运输方式<br><br>
+            <b>操作</b><br>
+            Step 2: 点击画布添加顶点 · 双击闭合多边形<br>
+            点击多边形选中 · 拖动顶点调整形状<br><br>
+            <b>快捷键</b><br>
+            <span class="hk">Y</span>是 <span class="hk">N</span>否<br>
+            <span class="hk">1-8</span>园区类型 <span class="hk">Q/W/E/R</span>运输方式<br>
+            <span class="hk">S</span>保存 <span class="hk">↵</span>下一页<br>
+            <span class="hk">Del</span>删除选中 <span class="hk">Esc</span>取消绘制<br>
+            <span class="hk">← →</span>翻页
+        </div>
+    </span>
+    <button class="user-nbtn" id="user-logoutBtn">退出</button>
+</div>
+
+<!-- ========== 主区域：左任务/中图像+绘制/右地图 ========== -->
+<div class="user-main">
+
+    <!-- 左侧：任务 + 单元列表 -->
+    <div class="user-left-panel" id="user-leftPanel">
+        <div class="user-panel-header" id="user-taskHeader">加载中...</div>
+        <div class="user-task-tabs" id="user-taskTabs"></div>
+        <div class="user-unit-list" id="user-unitList"></div>
+    </div>
+
+    <!-- 中部：图像 + 多边形绘制 canvas -->
+    <div class="user-img-panel" id="user-imgPanel">
+        <div class="user-img-wrap" id="user-imgWrap">
+            <img id="user-mainImg" src="" alt="" draggable="false">
+            <canvas id="user-maskCanvas"></canvas>
+            <canvas id="user-bboxCanvas"></canvas>
+            <canvas id="polyCanvas"></canvas>
+            <div class="img-loading-overlay" id="img-loading">
+                <div class="img-loading-spinner"></div>
+                <div class="img-loading-text">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧：地图 -->
+    <div class="user-map-panel">
+        <div id="user-map"></div>
+        <div class="user-map-hint">当前位置 | 周边 POI</div>
+    </div>
+
+</div>
+
+<!-- ========== 底部：标注操作区 ========== -->
+<div class="user-bottombar">
+    <div class="user-bb-cols">
+
+        <!-- 左：Phase 1（是/否）→ Phase 2（园区类型） -->
+        <div class="user-bb-col user-bb-left hybrid-phase1-col" id="hybrid-phase1-col">
+            <div class="user-bb-caption">图中是否有物流园区</div>
+            <div class="user-bb-bigbtns">
+                <button class="user-bigbtn big-yes" id="user-btnYes" data-result="是">
+                    <span class="bigbtn-glyph">&#10004;</span>
+                    <span class="bigbtn-text">是</span>
+                    <span class="bigbtn-key">Y</span>
+                </button>
+                <button class="user-bigbtn big-no" id="user-btnNo" data-result="否">
+                    <span class="bigbtn-glyph">&#10008;</span>
+                    <span class="bigbtn-text">否</span>
+                    <span class="bigbtn-key">N</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="user-bb-col user-bb-mid hybrid-phase2-col" id="hybrid-phase2-col" style="display:none;">
+            <div class="user-bb-caption">园区类型 <span class="user-bb-sub">每个框单独设定 · 点击多边形选中</span></div>
+            <div class="user-bb-bigbtns" id="poi-labelBtns">
+                <button class="user-bigbtn big-type" data-label="露天集装箱">
+                    <span class="bigbtn-glyph">1</span><span class="bigbtn-text">露天集装箱</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="露天散货">
+                    <span class="bigbtn-glyph">2</span><span class="bigbtn-text">露天散货</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="气液粮仓储罐">
+                    <span class="bigbtn-glyph">3</span><span class="bigbtn-text">气液粮仓储罐</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="批发市场">
+                    <span class="bigbtn-glyph">4</span><span class="bigbtn-text">批发市场</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="立体现代物流园">
+                    <span class="bigbtn-glyph">5</span><span class="bigbtn-text">立体现代物流园</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="传统集约物流园">
+                    <span class="bigbtn-glyph">6</span><span class="bigbtn-text">传统集约物流园</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="小物流聚集地">
+                    <span class="bigbtn-glyph">7</span><span class="bigbtn-text">小物流聚集地</span>
+                </button>
+                <button class="user-bigbtn big-type" data-label="码头/车站/机场">
+                    <span class="bigbtn-glyph">8</span><span class="bigbtn-text">码头/车站/机场</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- 中：运输方式（仅 Phase 2 可见） -->
+        <div class="user-bb-col user-bb-mid hybrid-trans-col" id="hybrid-trans-col" style="display:none;">
+            <div class="user-bb-caption">运输方式 <span class="user-bb-sub">整幅图 · 多选</span></div>
+            <div class="user-bb-bigbtns" id="poi-transBtns">
+                <button class="user-bigbtn big-trans on" data-mode="公路">
+                    <span class="bigbtn-glyph">&#x1F69B;</span>
+                    <span class="bigbtn-text">公路</span>
+                    <span class="bigbtn-key">Q</span>
+                </button>
+                <button class="user-bigbtn big-trans" data-mode="铁路">
+                    <span class="bigbtn-glyph">&#x1F684;</span>
+                    <span class="bigbtn-text">铁路</span>
+                    <span class="bigbtn-key">W</span>
+                </button>
+                <button class="user-bigbtn big-trans" data-mode="水路">
+                    <span class="bigbtn-glyph">&#x1F6A2;</span>
+                    <span class="bigbtn-text">水路</span>
+                    <span class="bigbtn-key">E</span>
+                </button>
+                <button class="user-bigbtn big-trans" data-mode="航空">
+                    <span class="bigbtn-glyph">&#x2708;</span>
+                    <span class="bigbtn-text">航空</span>
+                    <span class="bigbtn-key">R</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- 右：操作按钮（始终可见） -->
+        <div class="user-bb-col user-bb-right poi-action-col">
+            <div class="user-bb-caption">操作</div>
+            <div class="user-bb-bigbtns">
+                <button class="user-bigbtn big-save" id="user-saveBtn">
+                    <span class="bigbtn-glyph">&#x1F4BE;</span><span class="bigbtn-text">保存</span>
+                    <span class="bigbtn-key">S</span>
+                </button>
+            </div>
+            <div class="user-bb-actions">
+                <button class="user-bigbtn big-nav" id="user-prevBtn">
+                    <span class="bigbtn-glyph">&#x25C0;</span><span class="bigbtn-text">上一项</span>
+                </button>
+                <button class="user-bigbtn big-nav" id="user-nextBtn">
+                    <span class="bigbtn-glyph">&#x25B6;</span><span class="bigbtn-text">下一项</span>
+                    <span class="bigbtn-key">&#x21B5;</span>
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- 底部信息栏 -->
+    <div class="user-info-row">
+        <span><span class="user-l">图片:</span><span class="user-v" id="user-vName">-</span></span>
+        <span><span class="user-l">坐标:</span><span class="user-v" id="user-vCoord">-</span></span>
+        <span><span class="user-l">状态:</span><span class="user-v" id="user-vStatus">待标注</span></span>
+        <span><span class="user-l">多边形:</span><span class="user-v" id="user-polyCount">0</span></span>
+        <span><span class="user-l">运输方式:</span><span class="user-v" id="user-vTrans">-</span></span>
+        <span class="user-bb-keys" id="hybrid-keys">快捷键: <b>Y/N</b> 是/否 · <b>1-8</b> 园区类型 · <b>Q/W/E/R</b> 运输 · <b>S↵</b> 保存 · <b>← →</b> 翻页</span>
+    </div>
+</div>
+
+<!-- ========== JS 模块 ========== -->
+<script src="js/api.js"></script>
+<script src="js/map.js"></script>
+<script src="js/hybrid_main.js"></script>
+
+</body>
+</html>

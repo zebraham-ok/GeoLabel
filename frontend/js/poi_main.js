@@ -798,9 +798,11 @@
                 if (r.ok) {
                     if (r.role === 'admin') {
                         window.location.href = '/admin';
-                    } else if (r.task_type === 'judge') {
+                    } else if (r.task_type === 'judge' || r.task_type === 'judge_mask' || r.task_type === 'judge_shp') {
                         // judge 用户在 /poi 页面登录 → 跳转到 judge 页面
                         window.location.href = '/';
+                    } else if (r.task_type === 'hybrid') {
+                        window.location.href = '/hybrid';
                     } else {
                         window.location.reload();
                     }
