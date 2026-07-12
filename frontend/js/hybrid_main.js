@@ -201,10 +201,11 @@
         $('poiToolbarCount').textContent = polygons.length + ' 个框';
     }
 
-    // ===== Mask 高亮 + Bbox 渲染（Phase 1 专用，类似 judge 模式） =====
+    // ===== Mask 高亮 / 多边形 overlay + Bbox 渲染（Phase 1 专用） =====
     var _maskImgObj = null;  // 缓存已加载的 mask Image 对象
+    var _polyPx = null;      // 缓存多边形像素坐标（shp 模式）
 
-    function renderMaskOverlay(maskUrl, bbox) {
+    function renderMaskOverlay(maskUrl, bbox, polyPx) {
         var maskC = $('user-maskCanvas');
         var bboxC = $('user-bboxCanvas');
         if (!maskC || !bboxC || !dW || !dH) return;
@@ -214,10 +215,41 @@
         var bc = bboxC.getContext('2d');
         bc.clearRect(0, 0, bboxC.width, bboxC.height);
 
-        // ═══ mask 高亮（0.35 alpha，与 judge 模式一致） ═══
-        if (maskUrl) {
+        // ═══ 判断渲染模式 ═══
+        var useShp = polyPx && Array.isArray(polyPx) && polyPx.length >= 3;
+        _polyPx = useShp ? polyPx : null;
+
+        if (useShp) {
+            // ===== shp 模式：暗色覆盖 + 多边形镂空聚光灯 =====
             maskC.style.display = '';
-            // 如果已缓存同一 URL，直接绘制
+
+            // 缩放：多边形像素坐标 → canvas 显示坐标
+            var px = dW / nW;
+            var py = dH / nH;
+
+            // 1. 全屏变暗
+            mc.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            mc.fillRect(0, 0, dW, dH);
+
+            // 2. 多边形内清除暗色，露出原图亮度
+            mc.save();
+            mc.beginPath();
+            polyPx.forEach(function(pt, i) {
+                i === 0 ? mc.moveTo(pt[0] * px, pt[1] * py) : mc.lineTo(pt[0] * px, pt[1] * py);
+            });
+            mc.closePath();
+            mc.clip();
+            mc.clearRect(0, 0, dW, dH);
+
+            // 3. 红色轮廓线
+            mc.strokeStyle = 'rgba(233, 69, 96, 0.6)';
+            mc.lineWidth = 2;
+            mc.stroke();
+            mc.restore();
+
+        } else if (maskUrl) {
+            // ===== mask 模式：半透明 mask 叠加 =====
+            maskC.style.display = '';
             if (_maskImgObj && _maskImgObj._src === maskUrl && _maskImgObj.complete) {
                 mc.globalAlpha = 0.35;
                 mc.drawImage(_maskImgObj, 0, 0, dW, dH);
@@ -241,7 +273,7 @@
             maskC.style.display = 'none';
         }
 
-        // ═══ 红色 bbox ═══
+        // ═══ 红色 bbox（两种模式通用） ═══
         bboxC.style.display = '';
         if (bbox && bbox.length === 4 && nW && nH) {
             var sx = dW / nW;
@@ -255,6 +287,7 @@
 
     function clearMaskOverlay() {
         _maskImgObj = null;
+        _polyPx = null;
         ['user-maskCanvas', 'user-bboxCanvas'].forEach(function(cid) {
             var c = $(cid);
             if (!c) return;
@@ -531,9 +564,9 @@
             imgEl.onload = function() {
                 nW = this.naturalWidth; nH = this.naturalHeight;
                 calcRect();
-                // Phase 1：渲染 mask + bbox 高亮效果
-                if (phase === 1 && detail.mask_url && u.bbox) {
-                    renderMaskOverlay(detail.mask_url, u.bbox);
+                // Phase 1：渲染高亮区域（mask 或 shp 多边形 overlay）
+                if (phase === 1) {
+                    renderMaskOverlay(detail.mask_url, u.bbox, detail.polygon_pixels);
                 }
                 drawAll();
                 hideImgLoading();  // 图片加载完毕
@@ -599,9 +632,9 @@
             if (imgEl.complete && imgEl.naturalWidth) {
                 nW = imgEl.naturalWidth; nH = imgEl.naturalHeight;
                 calcRect();
-                // 图片已加载完成：Phase 1 展示 mask+bbox
-                if (phase === 1 && detail.mask_url && u.bbox) {
-                    renderMaskOverlay(detail.mask_url, u.bbox);
+                // 图片已加载完成：Phase 1 展示高亮区域
+                if (phase === 1) {
+                    renderMaskOverlay(detail.mask_url, u.bbox, detail.polygon_pixels);
                 }
                 drawAll();
             }

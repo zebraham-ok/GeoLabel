@@ -147,7 +147,7 @@ const Annotate = (function() {
         const sy = dispH / natH;
 
         // 1. 用半透明黑色填充全部（变暗效果）
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
         // 2. 在多边形区域内清除暗色覆盖，露出下方原图正常亮度
