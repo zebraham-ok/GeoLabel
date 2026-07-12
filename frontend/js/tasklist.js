@@ -47,7 +47,7 @@ const TaskList = (function() {
             el.className = cls;
             el.dataset.unitId = u.id;
 
-            const title = (u.image || '').replace(/\.png$/i, '');
+            const title = shortFileName(u.image || '');
             const short = title.length > 16 ? title.substring(0, 16) + '...' : title;
             el.innerHTML =
                 '<div class="user-unit-title">#' + u.id + ' · ' + short + '</div>' +

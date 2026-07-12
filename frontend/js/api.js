@@ -50,3 +50,14 @@ const API = (function() {
         submitPoiUnit: (taskId, groupId, unitId, payload) => request('/api/poi_unit/' + encodeURIComponent(taskId) + '/' + encodeURIComponent(groupId) + '/' + unitId + '/submit', { method: 'POST', body: payload }),
     };
 })();
+
+/**
+ * 简化文件名用于展示：去扩展名 + 去 B000XXXXXX_ 前缀
+ * 例如: "B000A8WDOP_北京西南金港物流园.png" → "北京西南金港物流园"
+ */
+function shortFileName(filename) {
+    if (!filename) return '';
+    let name = filename.replace(/\.(png|jpg|jpeg|tif|tiff)$/i, '');
+    name = name.replace(/^[A-Z0-9]+_/, '');
+    return name;
+}

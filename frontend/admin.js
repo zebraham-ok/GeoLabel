@@ -266,14 +266,10 @@
             loading = true;
         }
 
-        // POI 任务隐藏重叠系数
-        if (isPoi) {
-            overlapContainer.style.display = 'none';
-        } else {
-            overlapContainer.style.display = '';
-        }
+        // 重叠系数对所有任务类型均适用
+        overlapContainer.style.display = '';
 
-        const effectiveOverlap = isPoi ? 1 : overlap;
+        const effectiveOverlap = overlap;
         const perGroup = totalUnits > 0 ? Math.ceil(totalUnits * effectiveOverlap / numGroups) : 0;
         document.getElementById('admin-calc-total').textContent = loading ? '...' : totalUnits;
         document.getElementById('admin-calc-per-group').textContent = loading ? '...' : perGroup;
@@ -432,8 +428,11 @@
                 const rCls = a.result === '是' ? 'yes' : '';
                 return `<span class="di-row"><span class="di-gid">${a.group_id}</span><span class="di-result ${rCls}">${a.result}</span></span>`;
             }).join('');
+            const extra = typeof d.component_id === 'number'
+                ? ` · 连通集 #${d.component_id}`
+                : '';
             return `<div class="admin-disagree-item">
-                <div class="di-head">📷 ${d.image} · 连通集 #${d.component_id}</div>
+                <div class="di-head">📷 ${d.image}${extra}</div>
                 ${annRows}
             </div>`;
         }).join('');

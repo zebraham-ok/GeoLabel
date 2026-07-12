@@ -1227,8 +1227,8 @@ def admin_create_task():
 
     # ===== POI 任务：每个 PNG 是一个 unit =====
     else:
-        if overlap_factor > 1:
-            overlap_factor = 1  # POI 暂不支持重叠
+        if overlap_factor < 1 or overlap_factor > num_groups:
+            return jsonify({"error": "重叠系数非法"}), 400
 
         poi_dir = DATASETS_POI_DIR / dataset
         png_files = sorted(poi_dir.glob("*.png"))
@@ -1268,10 +1268,8 @@ def admin_create_task():
 
             all_units.append(unit)
 
-        # POI 任务简单轮询分配（每组均分）
-        groups_units = [[] for _ in range(num_groups)]
-        for i, unit in enumerate(all_units):
-            groups_units[i % num_groups].append(unit)
+        # POI 任务也使用交叉验证分配（与 Judge 一致）
+        groups_units = distribute_units_with_overlap(all_units, num_groups, overlap_factor)
 
     # ===== 生成账号 =====
     task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
@@ -1388,7 +1386,9 @@ def admin_task_detail(task_id):
             unit_info = next((u for u in group.get("units", []) if u["id"] == unit_id), None)
             if not unit_info:
                 continue
-            key = f"{unit_info['image']}|{unit_info['component_id']}"
+            # POI unit 没有 component_id，用 id 替代
+            comp_id = unit_info.get('component_id', unit_info['id'])
+            key = f"{unit_info['image']}|{comp_id}"
             if key not in unit_ann_map:
                 unit_ann_map[key] = []
             unit_ann_map[key].append({
@@ -1414,7 +1414,7 @@ def admin_task_detail(task_id):
             img, comp_id = key.split("|", 1)
             inconsistent_details.append({
                 "image": img,
-                "component_id": int(comp_id),
+                "component_id": int(comp_id) if comp_id.isdigit() else comp_id,
                 "annotations": ann_list
             })
 

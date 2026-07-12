@@ -285,6 +285,9 @@
             const old = p.label;
             if (old !== label) {
                 p.label = label;
+                curLabel = label;
+                updateLabelBtns();
+                $('poiToolbarActiveLabel').textContent = label;
                 drawAll();
                 toast('框 ' + (selectedPolyIdx + 1) + ': ' + (old || '未设定') + ' → ' + label);
             }
@@ -452,7 +455,7 @@
             el.className = cls;
             el.dataset.unitId = u.id;
 
-            const title = (u.image || '').replace(/\.png$/i, '');
+            const title = shortFileName(u.image || '');
             const short = title.length > 20 ? title.substring(0, 20) + '...' : title;
             el.innerHTML =
                 '<div class="user-unit-title">#' + u.id + ' · ' + short + '</div>' +
@@ -482,7 +485,7 @@
         curIdx = idx;
         highlightCurrent(u.id);
         setText('user-counter', (idx + 1) + '/' + curTask.units.length);
-        setText('user-tname', u.image);
+        setText('user-tname', shortFileName(u.image));
         setText('user-vCoord', (u.lat != null) ? u.lat + ', ' + u.lng : '-');
         setText('user-vSize', (u.img_width && u.img_height) ? u.img_width + '×' + u.img_height + ' px' : '-');
 
@@ -525,7 +528,7 @@
                 };
             }
 
-            setText('user-vName', u.image);
+            setText('user-vName', shortFileName(u.image));
             const s = statusMap[String(u.id)];
             const polyN = (s && s.polygon_count != null) ? s.polygon_count : polygons.length;
             setText('user-polyCount', polyN);
@@ -546,7 +549,7 @@
 
             // 初始化地图
             if (u.lat != null && u.lng != null) {
-                UserMap.init({ lng: u.lng, lat: u.lat, name: u.name || u.image });
+                UserMap.init({ lng: u.lng, lat: u.lat, name: shortFileName(u.image) });
             } else {
                 UserMap.init({ lng: 116.397428, lat: 39.90923, name: '' });
             }
