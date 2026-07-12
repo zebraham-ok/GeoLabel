@@ -168,6 +168,33 @@
             }
             ctx.strokeStyle = c; ctx.lineWidth = 2;
             ctx.setLineDash([5, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+            // 渲染已点击的顶点圆点
+            var PR = 4;
+            drawPts.forEach(function(p, i) {
+                var xy = pct2px(p.x, p.y);
+                // 外层光晕
+                ctx.beginPath(); ctx.arc(xy[0], xy[1], PR + 2, 0, Math.PI * 2);
+                ctx.fillStyle = c + '60'; ctx.fill();
+                // 内层实心
+                ctx.beginPath(); ctx.arc(xy[0], xy[1], PR, 0, Math.PI * 2);
+                ctx.fillStyle = (i === 0) ? '#fff' : c; ctx.fill();
+                ctx.strokeStyle = c; ctx.lineWidth = 1; ctx.stroke();
+                // 序号
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 8px sans-serif';
+                ctx.fillText(i + 1, xy[0] + 6, xy[1] - 4);
+            });
+
+            // 3 个点以上提示"双击闭合"
+            if (drawPts.length >= 3) {
+                var fxy = pct2px(drawPts[0].x, drawPts[0].y);
+                ctx.beginPath(); ctx.arc(fxy[0], fxy[1], PR + 6, 0, Math.PI * 2);
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                ctx.setLineDash([2, 2]); ctx.stroke(); ctx.setLineDash([]);
+                ctx.fillStyle = '#fff'; ctx.font = 'bold 9px sans-serif';
+                ctx.fillText('双击闭合', fxy[0] + 10, fxy[1] - 8);
+            }
         }
 
         setText('user-polyCount', polygons.length);
@@ -353,6 +380,19 @@
         }
     }
 
+    // 已标注"否"的完成态 UI：隐藏是/否按钮，仅展示 mask+bbox
+    function setDonePhaseUI() {
+        phase = 1;
+        $('hybrid-phase1-col').style.display = 'none';
+        $('hybrid-phase2-col').style.display = 'none';
+        $('hybrid-trans-col').style.display = 'none';
+        var cols = document.querySelector('.user-bb-cols');
+        cols.className = 'user-bb-cols hybrid-phase1-layout';
+        $('polyCanvas').style.pointerEvents = 'none';
+        $('polyCanvas').style.display = '';
+        setHint('已标注为\"否\"，按 Y 改为\"是\"重新标注');
+    }
+
     function clearResultHighlight() {
         document.querySelectorAll('.user-bigbtn[data-result]').forEach(function(b) { b.classList.remove('active'); });
     }
@@ -511,10 +551,10 @@
                 var ann = detail.existing_annotation;
                 hasPark = ann.has_park;
                 if (ann.has_park === false) {
-                    // 之前标注为"否"：保持 Phase 1，展示 mask+bbox
+                    // 已标注为"否"：隐藏是/否按钮，仅展示 mask+bbox，按 Y 可改为"是"
                     setText('user-vStatus', '已完成: 否');
                     statusMap[String(u.id)] = { done: true, has_park: false };
-                    setPhaseUI(1);
+                    setDonePhaseUI();
                 } else if (ann.has_park === true) {
                     // 之前标注为"是"：进入 Phase 2，恢复用户绘制的多边形
                     phase = 2;
