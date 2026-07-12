@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理员后台 - judging_app</title>
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+
+<!-- ========== 登录层 ========== -->
+<div id="admin-login-layer" class="admin-login-layer">
+    <div class="admin-login-card">
+        <h2>管理员登录</h2>
+        <div class="admin-form-row">
+            <label>账号</label>
+            <input type="text" id="admin-login-username" placeholder="请输入管理员账号" autocomplete="username" />
+        </div>
+        <div class="admin-form-row">
+            <label>密码</label>
+            <input type="password" id="admin-login-password" placeholder="请输入密码" autocomplete="current-password" />
+        </div>
+        <button id="admin-login-btn" class="admin-btn admin-btn-primary">登 录</button>
+        <p id="admin-login-msg" class="admin-msg"></p>
+        <p class="admin-tip">普通用户请前往 <a href="/" style="color:#4ecca3">用户端</a></p>
+    </div>
+</div>
+
+<!-- ========== 主后台 ========== -->
+<div id="admin-app" class="admin-app" style="display:none;">
+
+    <!-- 顶部条 -->
+    <header class="admin-header">
+        <div class="admin-header-left">
+            <span class="admin-logo">●</span>
+            <span class="admin-title">judging_app · 管理员后台</span>
+        </div>
+        <div class="admin-header-right">
+            <span id="admin-welcome" class="admin-welcome"></span>
+            <button id="admin-logout-btn" class="admin-btn admin-btn-ghost">退出登录</button>
+        </div>
+    </header>
+
+    <div class="admin-body">
+
+        <!-- 左侧：原始数据组 -->
+        <aside class="admin-sidebar">
+            <h3 class="admin-sidebar-title">原始数据组</h3>
+            <p class="admin-sidebar-hint">点击查看连通集分析</p>
+            <ul id="admin-dataset-list" class="admin-dataset-list">
+                <li class="admin-empty">加载中...</li>
+            </ul>
+            <button id="admin-refresh-datasets" class="admin-btn admin-btn-ghost admin-btn-small">刷新列表</button>
+        </aside>
+
+        <!-- 右侧主区域 -->
+        <main class="admin-main">
+
+            <!-- 选中的 dataset 概览 -->
+            <section class="admin-card" id="admin-dataset-overview" style="display:none;">
+                <div class="admin-card-head">
+                    <h3 id="admin-dataset-name-title">—</h3>
+                    <span id="admin-dataset-stats" class="admin-stats-pill">—</span>
+                </div>
+                <div class="admin-per-image-wrap">
+                    <table class="admin-table">
+                        <thead>
+                            <tr><th>#</th><th>图片 / mask 文件</th><th>连通集 (unit) 数</th></tr>
+                        </thead>
+                        <tbody id="admin-per-image-tbody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- 创建任务 -->
+            <section class="admin-card">
+                <div class="admin-card-head">
+                    <h3>基于原始数据组创建任务</h3>
+                    <span class="admin-hint">输入组数，自动生成账号和任务列表</span>
+                </div>
+
+                <form id="admin-create-form" class="admin-form" autocomplete="off">
+                    <div class="admin-form-grid">
+                        <div class="admin-form-row">
+                            <label>任务名称 <span class="admin-req">*</span></label>
+                            <input type="text" id="admin-task-name" placeholder="例如：园区 A 第一轮标注" required />
+                        </div>
+                        <div class="admin-form-row">
+                            <label>选择 dataset <span class="admin-req">*</span></label>
+                            <select id="admin-task-dataset" required>
+                                <option value="">-- 请先选择 dataset --</option>
+                            </select>
+                        </div>
+                        <div class="admin-form-row">
+                            <label>组数 <span class="admin-req">*</span></label>
+                            <input type="number" id="admin-num-groups" min="1" value="3" />
+                        </div>
+                        <div class="admin-form-row" id="admin-overlap-row">
+                            <label>重叠系数 <span class="admin-req">*</span></label>
+                            <input type="number" id="admin-overlap" min="1" value="1" />
+                            <small class="admin-tip-text">1=不重叠, N=每图被 N 个组标过（仅判读任务适用）</small>
+                        </div>
+                    </div>
+
+                    <div class="admin-calc-box">
+                        <div class="admin-calc-row">
+                            <span>总 unit 数：</span>
+                            <strong id="admin-calc-total">0</strong>
+                            <span class="admin-calc-sub">（来自所选 dataset 的 mask 连通集总数）</span>
+                        </div>
+                        <div class="admin-calc-row">
+                            <span>每组预计标注：</span>
+                            <strong id="admin-calc-per-group">0</strong>
+                            <span class="admin-calc-sub">≈ ceil(总unit × 重叠系数 / 组数)</span>
+                        </div>
+                    </div>
+
+                    <div class="admin-form-actions">
+                        <button type="submit" id="admin-create-btn" class="admin-btn admin-btn-primary">创建任务</button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- 已创建任务列表 -->
+            <section class="admin-card">
+                <div class="admin-card-head">
+                    <h3>已创建任务</h3>
+                    <button id="admin-refresh-tasks" class="admin-btn admin-btn-ghost admin-btn-small">刷新</button>
+                </div>
+                <table class="admin-table admin-table-tasks">
+                    <thead>
+                        <tr>
+                            <th>任务名</th>
+                            <th>Dataset</th>
+                            <th>组数</th>
+                            <th>重叠</th>
+                            <th>总 unit</th>
+                            <th>创建时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-tasks-tbody">
+                        <tr><td colspan="7" class="admin-empty">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+        </main>
+    </div>
+</div>
+
+<!-- ========== 任务详情弹窗 ========== -->
+<div id="admin-detail-modal" class="admin-modal" style="display:none;">
+    <div class="admin-modal-mask" onclick="document.getElementById('admin-detail-modal').style.display='none'"></div>
+    <div class="admin-modal-card admin-detail-card">
+        <div class="admin-modal-head">
+            <h3 id="admin-detail-title">任务详情</h3>
+            <button class="admin-modal-close" onclick="document.getElementById('admin-detail-modal').style.display='none'">×</button>
+        </div>
+        <div class="admin-modal-body" id="admin-detail-body"><p class="admin-empty">加载中...</p></div>
+        <div class="admin-modal-foot">
+            <button class="admin-btn admin-btn-ghost" id="admin-detail-download-btn" style="display:none">下载账号 zip</button>
+            <button class="admin-btn admin-btn-primary" onclick="document.getElementById('admin-detail-modal').style.display='none'">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 创建结果弹窗 ========== -->
+<div id="admin-modal" class="admin-modal" style="display:none;">
+    <div class="admin-modal-mask"></div>
+    <div class="admin-modal-card">
+        <div class="admin-modal-head">
+            <h3 id="admin-modal-title">任务创建成功</h3>
+            <button class="admin-modal-close" id="admin-modal-close">×</button>
+        </div>
+        <div class="admin-modal-body" id="admin-modal-body"></div>
+        <div class="admin-modal-foot">
+            <button class="admin-btn admin-btn-ghost" id="admin-modal-download-btn">下载账号 zip</button>
+            <button class="admin-btn admin-btn-primary" id="admin-modal-ok-btn">确定</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== Toast ========== -->
+<div id="admin-toast"></div>
+
+<!-- ========== 删除确认弹窗 ========== -->
+<div id="admin-confirm-modal" class="admin-modal" style="display:none;">
+    <div class="admin-modal-mask"></div>
+    <div class="admin-modal-card admin-confirm-card">
+        <div class="admin-modal-head">
+            <h3>⚠️ 确认删除</h3>
+            <button class="admin-modal-close" onclick="document.getElementById('admin-confirm-modal').style.display='none'">×</button>
+        </div>
+        <div class="admin-modal-body" id="admin-confirm-body">
+            <p>你确定要删除这个任务吗？</p>
+        </div>
+        <div class="admin-modal-foot">
+            <button class="admin-btn admin-btn-ghost" onclick="document.getElementById('admin-confirm-modal').style.display='none'">取消</button>
+            <button class="admin-btn admin-btn-danger" id="admin-confirm-ok-btn">确认删除</button>
+        </div>
+    </div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>
