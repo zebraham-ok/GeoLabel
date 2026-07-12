@@ -85,7 +85,18 @@ USER_FILE = ACCOUNTS_DIR / "user.json"
 AMAP_CONFIG_FILE = ROOT / "amap_config.json"
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="")
-app.secret_key = "judging_app_secret_key_change_me_in_production"
+
+# secret_key：生产环境从环境变量读取，开发环境使用固定值保证 session 不丢失
+_secret_key = os.environ.get("JUDGING_SECRET_KEY")
+if _secret_key:
+    app.secret_key = _secret_key
+elif os.environ.get("JUDGING_ENV") == "production":
+    _secret_key = secrets.token_hex(32)
+    app.secret_key = _secret_key
+    print(f"[INFO] 已生成随机 SECRET_KEY（服务重启后 session 将失效）")
+else:
+    app.secret_key = "judging_app_dev_secret_key"
+
 CORS(app, supports_credentials=True)
 
 # ==================== 工具函数 ====================
