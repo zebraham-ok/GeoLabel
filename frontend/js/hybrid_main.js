@@ -54,6 +54,12 @@
     var draggingPoint = null, wasDragging = false;
     var nW, nH, dW, dH, dX, dY;
     var ctx = null, mousePos = { x: 0, y: 0 };
+    var _prefetchAbort = null;  // 预加载取消控制器
+
+    // ===== 缩放与平移 =====
+    var _zoom = 1.0, _panX = 0, _panY = 0;
+    var _panning = false, _panStart = { x: 0, y: 0, panX: 0, panY: 0 };
+    var _overlayCache = null;  // Phase 1 高亮数据缓存（缩放/平移时重绘）
 
     // ===== 加载任务 =====
     var tasks = [];
@@ -76,20 +82,29 @@
     try { statusMap = (await API.unitStatus(curTask.task_id, curTask.group_id)) || {}; }
     catch (e) { statusMap = {}; }
 
-    // ===== 画布尺寸 =====
-    function calcRect() {
-        if (!nW || !nH) return;
+    // ===== 画布尺寸（含缩放和平移） =====
+    function _fitRect() {
         var wrap = $('user-imgWrap');
         var pw = wrap.clientWidth, ph = wrap.clientHeight;
         var s = Math.min(pw / nW, ph / nH);
-        dW = Math.round(nW * s); dH = Math.round(nH * s);
-        dX = Math.round((pw - dW) / 2); dY = Math.round((ph - dH) / 2);
+        var fitW = nW * s, fitH = nH * s;
+        return { w: fitW, h: fitH, x: (pw - fitW) / 2, y: (ph - fitH) / 2, s: s };
+    }
+
+    function calcRect() {
+        if (!nW || !nH) return;
+        var fit = _fitRect();
+        dW = Math.round(fit.w * _zoom);
+        dH = Math.round(fit.h * _zoom);
+        // 缩放以 fit 中心为锚点，叠加平移偏移
+        dX = Math.round(fit.x + _panX - (dW - fit.w) / 2);
+        dY = Math.round(fit.y + _panY - (dH - fit.h) / 2);
+
         var img = $('user-mainImg');
         img.style.position = 'absolute'; img.style.left = dX + 'px'; img.style.top = dY + 'px';
         img.style.width = dW + 'px'; img.style.height = dH + 'px';
         img.style.maxWidth = 'none'; img.style.maxHeight = 'none';
 
-        // mask / bbox / poly 三个 canvas 都对齐到图片位置
         ['user-maskCanvas', 'user-bboxCanvas', 'polyCanvas'].forEach(function(cid) {
             var c = $(cid);
             if (!c) return;
@@ -98,6 +113,14 @@
             c.width = dW; c.height = dH;
         });
         ctx = $('polyCanvas').getContext('2d');
+    }
+
+    function resetZoom() { _zoom = 1.0; _panX = 0; _panY = 0; }
+
+    function _reapplyOverlay() {
+        if (_overlayCache) {
+            renderMaskOverlay(_overlayCache.mask_url, _overlayCache.bbox, _overlayCache.poly_px);
+        }
     }
 
     function px2pct(px, py) { return [(px / dW) * 100, (py / dH) * 100]; }
@@ -283,6 +306,7 @@
             bc.lineWidth = 2;
             bc.strokeRect(bx * sx, by * sy, bw * sx, bh * sy);
         }
+        _overlayCache = { mask_url: maskUrl, bbox: bbox, poly_px: polyPx };
     }
 
     function clearMaskOverlay() {
@@ -409,7 +433,7 @@
             $('polyCanvas').style.display = '';
             // Phase 2：清除 mask/bbox 高亮效果
             clearMaskOverlay();
-            setHint('点击选中多边形 · 拖动顶点调整 · 双击画布添加新多边形');
+            setHint('点击选中多边形 · 拖动顶点调整 · 双击画布添加新多边形 · 按 N 改为否');
         }
     }
 
@@ -423,19 +447,54 @@
         cols.className = 'user-bb-cols hybrid-phase1-layout';
         $('polyCanvas').style.pointerEvents = 'none';
         $('polyCanvas').style.display = '';
-        setHint('已标注为\"否\"，按 Y 改为\"是\"重新标注');
+        setHint('已标注为"否"，点击"改为是"按钮或按 Y 重新标注');
     }
 
     function clearResultHighlight() {
         document.querySelectorAll('.user-bigbtn[data-result]').forEach(function(b) { b.classList.remove('active'); });
     }
 
-    // ===== 画布事件 =====
+    // ===== 画布事件（含缩放/平移） =====
     function attachCanvasEvents() {
         var canvas = $('polyCanvas');
+        var wrap = $('user-imgWrap');
+        var ZOOM_STEP = 1.12, ZOOM_MIN = 1.0, ZOOM_MAX = 8.0;
 
+        // ── 滚轮缩放（鼠标位置为中心缩放） ──
+        wrap.addEventListener('wheel', function(e) {
+            if (!curUnit || !nW || !nH) return;
+            e.preventDefault();
+            var fit = _fitRect();
+            var wr = wrap.getBoundingClientRect();
+            var cx = e.clientX - wr.left, cy = e.clientY - wr.top;
+            var fx = (cx - dX) / dW, fy = (cy - dY) / dH;
+            var newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+                _zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)));
+            if (Math.abs(newZoom - _zoom) < 0.001) return;
+            var ndW = fit.w * newZoom, ndH = fit.h * newZoom;
+            _panX = cx - fx * ndW - fit.x + (ndW - fit.w) / 2;
+            _panY = cy - fy * ndH - fit.y + (ndH - fit.h) / 2;
+            _zoom = newZoom;
+            calcRect();
+            if (phase === 1) _reapplyOverlay();
+            drawAll();
+        }, { passive: false });
+
+        // ── 右键拖拽平移 ──
         canvas.addEventListener('mousedown', function(e) {
-            if (!curUnit || isDrawing || phase === 1) return;
+            if (!curUnit) return;
+            if (e.button === 2) {
+                // 正在绘制时右键留给 contextmenu 取消绘制
+                if (isDrawing) return;
+                e.preventDefault();
+                _panning = true;
+                _panStart.x = e.clientX; _panStart.y = e.clientY;
+                _panStart.panX = _panX; _panStart.panY = _panY;
+                this.style.cursor = 'grabbing';
+                return;
+            }
+            // 左键：顶点拖动（仅 Phase 2）
+            if (isDrawing || phase === 1) return;
             var rect = this.getBoundingClientRect();
             var pct = px2pct(e.clientX - rect.left, e.clientY - rect.top);
             var ptHit = findPointAt(pct[0], pct[1], 1.5);
@@ -448,6 +507,15 @@
 
         canvas.addEventListener('mousemove', function(e) {
             if (!curUnit) return;
+            // 平移中
+            if (_panning) {
+                _panX = _panStart.panX + (e.clientX - _panStart.x);
+                _panY = _panStart.panY + (e.clientY - _panStart.y);
+                calcRect();
+                if (phase === 1) _reapplyOverlay();
+                drawAll();
+                return;
+            }
             var rect = this.getBoundingClientRect();
             var pct = px2pct(e.clientX - rect.left, e.clientY - rect.top);
             mousePos = pct;
@@ -466,6 +534,7 @@
 
         document.addEventListener('mouseup', function() {
             if (draggingPoint) { draggingPoint = null; var cv = $('polyCanvas'); if (cv) cv.style.cursor = 'crosshair'; }
+            if (_panning) { _panning = false; var cv = $('polyCanvas'); if (cv) cv.style.cursor = 'crosshair'; }
         });
 
         canvas.addEventListener('click', function(e) {
@@ -497,15 +566,18 @@
         canvas.addEventListener('dblclick', function(e) {
             if (!isDrawing || drawPts.length < 3 || phase === 1) return;
             e.preventDefault();
+            // 双击时 click 先触发加了一个点，这里去掉那个多余点
+            drawPts.pop();
             finishPoly();
         });
 
         canvas.addEventListener('contextmenu', function(e) {
             e.preventDefault();
+            // 如果是平移结束后的右键，忽略（已在 mouseup 清理）
             if (isDrawing) { isDrawing = false; drawPts = []; drawAll(); setHint('点击画布添加顶点 · 双击闭合 · 右键取消'); }
         });
 
-        window.addEventListener('resize', function() { if (nW && nH) { calcRect(); drawAll(); } });
+        window.addEventListener('resize', function() { if (nW && nH) { resetZoom(); calcRect(); drawAll(); } });
     }
 
     // ===== 左侧 unit 列表 =====
@@ -550,6 +622,7 @@
     // ===== 选择 unit =====
     async function selectUnit(u, idx) {
         if (_imgLoading) return;  // 防重复点击
+        resetZoom();  // 切换 unit 时恢复默认缩放
         showImgLoading();
 
         curUnit = u; curIdx = idx;
@@ -570,6 +643,7 @@
                 }
                 drawAll();
                 hideImgLoading();  // 图片加载完毕
+                prefetchNextUnit(idx);  // 低优先级预加载下一张图片
             };
             imgEl.onerror = function() {
                 hideImgLoading();
@@ -637,6 +711,7 @@
                     renderMaskOverlay(detail.mask_url, u.bbox, detail.polygon_pixels);
                 }
                 drawAll();
+                prefetchNextUnit(idx);
             }
 
             if (u.lat != null && u.lng != null) {
@@ -649,6 +724,7 @@
             toast('加载 unit 失败: ' + e.message);
         }
         renderUnitList();
+        updateToggleBtn();
     }
 
     // ===== 是/否 处理 =====
@@ -663,12 +739,16 @@
         selectedPolyIdx = -1;
         setPhaseUI(2);
         drawAll();
+        updateToggleBtn();
         toast('请手动用多边形框选出物流园区位置');
     }
 
     async function onNo() {
         if (!curUnit || _imgLoading) return;
         hasPark = false;
+        // 立即显示加载遮罩（直接操作 DOM，不设 _imgLoading 避免阻塞 selectUnit）
+        var ov = $('img-loading');
+        if (ov) ov.classList.remove('hidden');
         try {
             var resp = await API.submitUnit(curTask.task_id, curTask.group_id, curUnit.id, {
                 has_park: false, result: '否',
@@ -680,10 +760,46 @@
                 highlightCurrent(curUnit.id);
                 setText('user-vStatus', '已完成: 否');
                 toast('已保存: 否');
+                updateToggleBtn();
                 await jumpToNextPending();
+            } else {
+                if (ov) ov.classList.add('hidden');
             }
         } catch (e) {
+            if (ov) ov.classList.add('hidden');
             toast('保存失败: ' + e.message);
+        }
+    }
+
+    // ===== 切换是/否 =====
+    async function onToggleHasPark() {
+        if (!curUnit || _imgLoading) return;
+        if (hasPark === true) {
+            // 当前"是" → 改为"否"
+            await onNo();
+        } else if (hasPark === false) {
+            // 当前"否" → 改为"是"
+            onYes();
+        }
+    }
+
+    function updateToggleBtn() {
+        var btn = $('user-toggleBtn');
+        if (!btn) return;
+        if (hasPark === true) {
+            btn.querySelector('.bigbtn-glyph').innerHTML = '&#10008;';
+            btn.querySelector('.bigbtn-text').textContent = '改为否';
+            btn.querySelector('.bigbtn-key').textContent = 'N';
+            btn.className = 'user-bigbtn big-no';
+            btn.style.display = '';
+        } else if (hasPark === false) {
+            btn.querySelector('.bigbtn-glyph').innerHTML = '&#10004;';
+            btn.querySelector('.bigbtn-text').textContent = '改为是';
+            btn.querySelector('.bigbtn-key').textContent = 'Y';
+            btn.className = 'user-bigbtn big-yes';
+            btn.style.display = '';
+        } else {
+            btn.style.display = 'none';
         }
     }
 
@@ -752,26 +868,33 @@
             toast('请先选择"是"或"否"');
             return;
         }
+        showImgLoading();  // 立即显示加载中，不等保存完成
         var saved = await saveHybrid();
-        if (saved === null) return;
+        if (saved === null) { hideImgLoading(); return; }
+        _imgLoading = false;  // 临时解除锁，selectUnit 内部会立即重新加锁
         await jumpToNextPending();
     }
 
     async function onPrev() {
         if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         var saved = await saveHybrid();
-        if (saved === null) return;
+        if (saved === null) { hideImgLoading(); return; }
+        _imgLoading = false;  // 临时解除锁
         if (curIdx > 0) {
             await selectUnit(curTask.units[curIdx - 1], curIdx - 1);
         } else {
+            hideImgLoading();
             toast('已是第一项');
         }
     }
 
     async function onNext() {
         if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         var saved = await saveHybrid();
-        if (saved === null) return;
+        if (saved === null) { hideImgLoading(); return; }
+        _imgLoading = false;  // 临时解除锁
         await jumpToNextPending();
     }
 
@@ -782,6 +905,54 @@
         }
         renderUnitList();
         highlightCurrent(curUnit ? curUnit.id : -1);
+    }
+
+    // ===== 预加载下一个 unit 的图片（低优先级，不阻塞当前操作） =====
+    function _prefetchUnitDetail(taskId, groupId, unitId) {
+        return fetch('/api/unit/' + encodeURIComponent(taskId) + '/' +
+            encodeURIComponent(groupId) + '/' + unitId, { credentials: 'include' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .catch(function() { return null; });
+    }
+
+    function prefetchNextUnit(currentIdx) {
+        // 取消上一个预加载
+        if (_prefetchAbort) { _prefetchAbort = null; }
+
+        // 找下一个 unit（优先找未完成的）
+        var nextIdx = -1;
+        for (var i = currentIdx + 1; i < curTask.units.length; i++) {
+            var s = statusMap[String(curTask.units[i].id)];
+            if (!s || !s.done) { nextIdx = i; break; }
+        }
+        // 如果后面全完成了，预加载上一个（退回去的可能）
+        if (nextIdx === -1 && currentIdx > 0) {
+            nextIdx = currentIdx - 1;
+        }
+        if (nextIdx === -1) return;
+
+        var nextUnit = curTask.units[nextIdx];
+        var doPrefetch = function() {
+            _prefetchUnitDetail(curTask.task_id, curTask.group_id, nextUnit.id)
+                .then(function(detail) {
+                    if (!detail || !detail.image_url) return;
+                    // 用 <link rel="prefetch"> 让浏览器后台缓存图片
+                    var link = document.createElement('link');
+                    link.rel = 'prefetch';
+                    link.href = detail.image_url;
+                    link.setAttribute('as', 'image');
+                    document.head.appendChild(link);
+                    // 5 秒后清理 DOM 节点（缓存已生效）
+                    setTimeout(function() { if (link.parentNode) link.parentNode.removeChild(link); }, 5000);
+                });
+        };
+
+        // requestIdleCallback: 等浏览器空闲再执行，不影响当前渲染
+        if (window.requestIdleCallback) {
+            _prefetchAbort = requestIdleCallback(doPrefetch, { timeout: 3000 });
+        } else {
+            _prefetchAbort = setTimeout(doPrefetch, 800);
+        }
     }
 
     function undoPoly() {
@@ -839,6 +1010,7 @@
     });
     $('poiUndoBtn').addEventListener('click', undoPoly);
     $('poiDelPolyBtn').addEventListener('click', deleteSelectedPoly);
+    $('user-toggleBtn').addEventListener('click', onToggleHasPark);
 
     // ===== 快捷键 =====
     document.addEventListener('keydown', function(e) {
@@ -878,6 +1050,11 @@
             e.preventDefault();
             isDrawing = false; drawPts = []; selectedPolyIdx = -1;
             drawAll(); return;
+        }
+
+        // Phase 2: N → 改为"否"
+        if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && k === 'n') {
+            e.preventDefault(); onToggleHasPark(); return;
         }
 
         if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && k === 's') {

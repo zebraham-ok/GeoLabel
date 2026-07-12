@@ -49,6 +49,114 @@
     let curUnit = null;
     let curIdx = 0;
 
+    // ===== 加载中遮罩 =====
+    let _imgLoading = false;
+    function showImgLoading() {
+        _imgLoading = true;
+        const ov = document.getElementById('img-loading');
+        if (ov) ov.classList.remove('hidden');
+    }
+    function hideImgLoading() {
+        _imgLoading = false;
+        const ov = document.getElementById('img-loading');
+        if (ov) ov.classList.add('hidden');
+    }
+
+    // ===== 缩放与平移 =====
+    let _zoom = 1.0, _panX = 0, _panY = 0;
+    let _panning = false, _panStart = { x: 0, y: 0, panX: 0, panY: 0 };
+    let nW, nH, dW, dH, dX, dY;
+
+    function _fitRect() {
+        const wrap = document.getElementById('user-imgWrap');
+        const pw = wrap.clientWidth, ph = wrap.clientHeight;
+        const s = Math.min(pw / nW, ph / nH);
+        const fitW = nW * s, fitH = nH * s;
+        return { w: fitW, h: fitH, x: (pw - fitW) / 2, y: (ph - fitH) / 2, s };
+    }
+
+    function calcRect() {
+        if (!nW || !nH) return;
+        const fit = _fitRect();
+        dW = Math.round(fit.w * _zoom);
+        dH = Math.round(fit.h * _zoom);
+        dX = Math.round(fit.x + _panX - (dW - fit.w) / 2);
+        dY = Math.round(fit.y + _panY - (dH - fit.h) / 2);
+
+        const img = document.getElementById('user-mainImg');
+        img.style.position = 'absolute'; img.style.left = dX + 'px'; img.style.top = dY + 'px';
+        img.style.width = dW + 'px'; img.style.height = dH + 'px';
+        img.style.maxWidth = 'none'; img.style.maxHeight = 'none';
+
+        ['user-maskCanvas', 'user-bboxCanvas'].forEach(function(cid) {
+            const c = document.getElementById(cid);
+            if (!c) return;
+            c.style.left = dX + 'px'; c.style.top = dY + 'px';
+            c.style.width = dW + 'px'; c.style.height = dH + 'px';
+            c.width = dW; c.height = dH;
+        });
+    }
+
+    function resetZoom() { _zoom = 1.0; _panX = 0; _panY = 0; }
+
+    function _reapplyOverlay() { Annotate.reRender(); }
+
+    function _attachZoomPan() {
+        const wrap = document.getElementById('user-imgWrap');
+        const ZOOM_STEP = 1.12, ZOOM_MIN = 1.0, ZOOM_MAX = 8.0;
+
+        wrap.addEventListener('wheel', function(e) {
+            if (!curUnit || !nW || !nH) return;
+            e.preventDefault();
+            const fit = _fitRect();
+            const wr = wrap.getBoundingClientRect();
+            const cx = e.clientX - wr.left, cy = e.clientY - wr.top;
+            const fx = (cx - dX) / dW, fy = (cy - dY) / dH;
+            const newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+                _zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)));
+            if (Math.abs(newZoom - _zoom) < 0.001) return;
+            const ndW = fit.w * newZoom, ndH = fit.h * newZoom;
+            _panX = cx - fx * ndW - fit.x + (ndW - fit.w) / 2;
+            _panY = cy - fy * ndH - fit.y + (ndH - fit.h) / 2;
+            _zoom = newZoom;
+            calcRect();
+            _reapplyOverlay();
+        }, { passive: false });
+
+        const bboxC = document.getElementById('user-bboxCanvas');
+        bboxC.addEventListener('mousedown', function(e) {
+            if (!curUnit) return;
+            if (e.button === 2) {
+                e.preventDefault();
+                _panning = true;
+                _panStart.x = e.clientX; _panStart.y = e.clientY;
+                _panStart.panX = _panX; _panStart.panY = _panY;
+                this.style.cursor = 'grabbing';
+            }
+        });
+
+        bboxC.addEventListener('mousemove', function(e) {
+            if (!curUnit) return;
+            if (_panning) {
+                _panX = _panStart.panX + (e.clientX - _panStart.x);
+                _panY = _panStart.panY + (e.clientY - _panStart.y);
+                calcRect();
+                _reapplyOverlay();
+            }
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (_panning) { _panning = false; const c = document.getElementById('user-bboxCanvas'); if (c) c.style.cursor = ''; }
+        });
+
+        // 阻止右键菜单（在画布区域）
+        bboxC.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+        window.addEventListener('resize', function() {
+            if (nW && nH) { resetZoom(); calcRect(); _reapplyOverlay(); }
+        });
+    }
+
     // ===== 加载数据 =====
     let tasks = [];
     try {
@@ -105,6 +213,7 @@
     }
     document.getElementById('user-loading').classList.add('hide');
     await selectUnit(curTask.units[firstIdx], firstIdx, curTask);
+    _attachZoomPan();
 
     // 绑定按钮
     document.getElementById('user-btnYes').addEventListener('click', () => onResult('是'));
@@ -187,6 +296,8 @@
     });
 
     async function selectUnit(u, idx, task) {
+        if (_imgLoading) return;
+        showImgLoading();
         curUnit = u;
         curIdx = idx;
         TaskList.highlightCurrent(u.id);
@@ -205,7 +316,12 @@
         try {
             const detail = await API.getUnit(task.task_id, task.group_id, u.id);
             Annotate.setUnit(task, { group_id: task.group_id }, u);
-            await Annotate.loadImage(detail);
+            const imgInfo = await Annotate.loadImage(detail);
+            nW = imgInfo.natW; nH = imgInfo.natH;
+            resetZoom();
+            calcRect();
+            await Annotate.renderOverlay(nW, nH);
+            hideImgLoading();
 
             // 加载已有标注
             Annotate.resetTypeAndTrans();
@@ -252,37 +368,44 @@
     }
 
     async function onSaveOnly() {
-        if (!curUnit) return;
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         // 复用当前 result（如有）
         const s = statusMap[String(curUnit.id)];
         const result = s ? s.result : '不确定';
         const r = await Annotate.save(result);
         if (r && r.ok) {
             toast('已保存');
+            _imgLoading = false;  // 临时解除锁
             await jumpToNextPending();
-        }
+        } else { hideImgLoading(); }
     }
 
     async function onNext() {
-        if (!curUnit) return;
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         // 自动保存当前标注再跳转
         const s = statusMap[String(curUnit.id)];
         const result = s ? s.result : '不确定';
         await Annotate.save(result);
+        _imgLoading = false;  // 临时解除锁
         await jumpToNextPending();
     }
 
     async function onPrev() {
-        if (!curUnit) return;
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         // 自动保存当前标注再跳转
         const s = statusMap[String(curUnit.id)];
         const result = s ? s.result : '不确定';
         await Annotate.save(result);
+        _imgLoading = false;  // 临时解除锁
 
         const task = curTask;
         if (curIdx > 0) {
             await selectUnit(task.units[curIdx - 1], curIdx - 1, task);
         } else {
+            hideImgLoading();
             toast('已是第一项');
         }
     }

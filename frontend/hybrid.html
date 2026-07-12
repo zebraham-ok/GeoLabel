@@ -44,12 +44,14 @@
             Step 2（选"是"后）: 高亮消失，需手动绘制多边形<br>
             点击选中后选择园区类型和运输方式<br><br>
             <b>操作</b><br>
+            鼠标滚轮缩放图像 · 右键按住拖拽平移画布<br>
             Step 2: 点击画布添加顶点 · 双击闭合多边形<br>
             点击多边形选中 · 拖动顶点调整形状<br><br>
             <b>快捷键</b><br>
             <span class="hk">Y</span>是 <span class="hk">N</span>否<br>
             <span class="hk">1-8</span>园区类型 <span class="hk">Q/W/E/R</span>运输方式<br>
             <span class="hk">S</span>保存 <span class="hk">↵</span>下一页<br>
+            <span class="hk">N</span>(Phase 2)改为否<br>
             <span class="hk">Del</span>删除选中 <span class="hk">Esc</span>取消绘制<br>
             <span class="hk">← →</span>翻页
         </div>
@@ -175,6 +177,11 @@
                     <span class="bigbtn-glyph">&#x1F4BE;</span><span class="bigbtn-text">保存</span>
                     <span class="bigbtn-key">S</span>
                 </button>
+                <button class="user-bigbtn big-no" id="user-toggleBtn" style="display:none;">
+                    <span class="bigbtn-glyph">&#10008;</span>
+                    <span class="bigbtn-text">改为否</span>
+                    <span class="bigbtn-key">N</span>
+                </button>
             </div>
             <div class="user-bb-actions">
                 <button class="user-bigbtn big-nav" id="user-prevBtn">
@@ -196,7 +203,7 @@
         <span><span class="user-l">状态:</span><span class="user-v" id="user-vStatus">待标注</span></span>
         <span><span class="user-l">多边形:</span><span class="user-v" id="user-polyCount">0</span></span>
         <span><span class="user-l">运输方式:</span><span class="user-v" id="user-vTrans">-</span></span>
-        <span class="user-bb-keys" id="hybrid-keys">快捷键: <b>Y/N</b> 是/否 · <b>1-8</b> 园区类型 · <b>Q/W/E/R</b> 运输 · <b>S↵</b> 保存 · <b>← →</b> 翻页</span>
+        <span class="user-bb-keys" id="hybrid-keys">快捷键: <b>Y/N</b> 是/否 · <b>N</b>(Phase 2) 改为否 · <b>1-8</b> 园区类型 · <b>Q/W/E/R</b> 运输 · <b>S↵</b> 保存 · <b>← →</b> 翻页</span>
     </div>
 </div>
 

@@ -74,11 +74,58 @@ class MemoryCache:
                 self._expires.pop(k, None)
 
 
+# ==================== 图片 LRU 内存缓存（减少磁盘 I/O） ====================
+class ImageLRUCache:
+    """线程安全的 LRU 图片缓存，带内存上限（默认 512 MB）"""
+
+    def __init__(self, max_size_bytes: int = 512 * 1024 * 1024):
+        self._max_size = max_size_bytes
+        self._store: Dict[str, bytes] = {}       # key -> 图片二进制
+        self._access: Dict[str, float] = {}       # key -> 最后访问时间戳
+        self._lock = threading.Lock()
+        self._current_size = 0
+
+    def get(self, key: str) -> Optional[bytes]:
+        with self._lock:
+            data = self._store.get(key)
+            if data is not None:
+                self._access[key] = time.time()
+            return data
+
+    def set(self, key: str, data: bytes) -> None:
+        with self._lock:
+            # 如果 key 已存在，先减去旧大小
+            old = self._store.get(key)
+            if old is not None:
+                self._current_size -= len(old)
+
+            self._store[key] = data
+            self._access[key] = time.time()
+            self._current_size += len(data)
+
+            # LRU 驱逐：从最久未访问的开始
+            while self._current_size > self._max_size and self._store:
+                lru_key = min(self._access, key=lambda k: self._access[k])
+                removed = self._store.pop(lru_key, None)
+                self._access.pop(lru_key, None)
+                if removed:
+                    self._current_size -= len(removed)
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "entries": len(self._store),
+                "size_mb": round(self._current_size / (1024 * 1024), 2),
+                "max_mb": round(self._max_size / (1024 * 1024), 2),
+            }
+
+
 # 不同数据的缓存 TTL
 task_cache = MemoryCache(default_ttl=60.0)       # task JSON 60 秒缓存
 status_cache = MemoryCache(default_ttl=15.0)      # unit 状态 15 秒缓存
 annotation_cache = MemoryCache(default_ttl=30.0)  # 标注内容 30 秒缓存
 poi_mem_cache = MemoryCache(default_ttl=3600.0)   # POI 结果 1 小时缓存
+image_cache = ImageLRUCache(max_size_bytes=512 * 1024 * 1024)  # 图片 512MB LRU
 
 ADMIN_FILE = ACCOUNTS_DIR / "admin.json"
 USER_FILE = ACCOUNTS_DIR / "user.json"
@@ -670,7 +717,48 @@ def get_unit_status():
     return jsonify(status)
 
 
-# ==================== 路由：图片 & Mask ====================
+# ==================== 路由：图片 & Mask（带 LRU 内存缓存 + 浏览器缓存头） ====================
+_IMAGE_CACHE_MAX_AGE = 86400  # 浏览器缓存 24 小时
+
+
+def _cached_send_file(filepath: Path, mimetype: str, cache_key: str):
+    """
+    带内存缓存 + 浏览器缓存头的 send_file：
+    1. 内存 LRU 缓存命中 → 直接返回 bytes
+    2. 磁盘读取 → 存入 LRU 缓存 → 返回
+    3. 浏览器 If-None-Match → 304 Not Modified
+    """
+    # ETag 必须 ASCII-safe：对含中文的缓存 key 做 URL 编码
+    etag_val = quote(cache_key, safe='')
+
+    # 内存缓存命中
+    cached = image_cache.get(cache_key)
+    if cached is not None:
+        # 检查浏览器缓存
+        req_etag = request.headers.get("If-None-Match", "")
+        if req_etag == etag_val:
+            from flask import Response
+            return Response(status=304)
+        from flask import Response
+        return Response(cached, mimetype=mimetype, headers={
+            "Cache-Control": f"public, max-age={_IMAGE_CACHE_MAX_AGE}, immutable",
+            "ETag": etag_val,
+        })
+
+    # 读取磁盘
+    try:
+        data = filepath.read_bytes()
+        image_cache.set(cache_key, data)
+    except (IOError, OSError):
+        return jsonify({"error": "read failed"}), 500
+
+    from flask import Response
+    return Response(data, mimetype=mimetype, headers={
+        "Cache-Control": f"public, max-age={_IMAGE_CACHE_MAX_AGE}, immutable",
+        "ETag": etag_val,
+    })
+
+
 @app.route("/api/image/<path:filename>")
 def serve_image(filename):
     """从 datasets_judge/<dataset>/ 读取原图（支持 img/ 子目录或 district 子目录）"""
@@ -681,12 +769,14 @@ def serve_image(filename):
     img_dir = DATASETS_JUDGE_DIR / dataset / "img"
     path = img_dir / os.path.basename(decoded)
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
+        ck = f"img:{dataset}:{os.path.basename(decoded)}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
 
     # 2. 尝试直接相对路径（judge_shp 类型，如 "延庆区/40.325_116.048_8452.jpg"）
     path = DATASETS_JUDGE_DIR / dataset / decoded
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/jpeg")
+        ck = f"img:{dataset}:{decoded}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/jpeg", ck)
 
     return jsonify({"error": "not found"}), 404
 
@@ -699,7 +789,8 @@ def serve_mask(filename):
     path = mask_dir / safe
     if not path.exists():
         return jsonify({"error": "not found"}), 404
-    return send_file(path.open("rb"), mimetype="image/png")
+    ck = f"mask:{dataset}:{safe}:{path.stat().st_mtime}"
+    return _cached_send_file(path, "image/png", ck)
 
 
 @app.route("/api/poi_image/<path:filename>")
@@ -707,17 +798,19 @@ def serve_poi_image(filename):
     """从 datasets_poi/<dataset>/ 读取 PNG；找不到时 fallback 到 datasets_judge/<dataset>/img/"""
     dataset = request.args.get("dataset", "")
     safe = os.path.basename(unquote(filename))
-    
+
     # 1. 先查 POI 目录
     path = DATASETS_POI_DIR / dataset / safe
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
-    
+        ck = f"poi:{dataset}:{safe}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
+
     # 2. Fallback：查 judge 目录下的 img 子目录
     path = DATASETS_JUDGE_DIR / dataset / "img" / safe
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
-    
+        ck = f"poi_fb:{dataset}:{safe}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
+
     return jsonify({"error": "not found"}), 404
 
 
@@ -1064,6 +1157,14 @@ def admin_amap_rotate():
         return jsonify({"error": "无权限"}), 403
     info = _rotate_amap_key()
     return jsonify({"ok": True, "new_key": info})
+
+
+@app.route("/api/admin/cache_stats", methods=["GET"])
+def admin_cache_stats():
+    """返回图片 LRU 缓存状态（管理端监控）"""
+    if session.get("role") != "admin":
+        return jsonify({"error": "无权限"}), 403
+    return jsonify(image_cache.stats())
 
 
 # ==================== 管理员：dataset 管理 ====================

@@ -40,6 +40,7 @@
             在卫星影像上绘制多边形，按 8 类园区类型标注。<br>
             右侧地图可查看周边 POI 辅助判断。<br><br>
             <b>操作</b><br>
+            鼠标滚轮缩放图像 · 右键按住拖拽平移画布<br>
             点击画布添加多边形顶点 · 双击闭合<br>
             新多边形默认灰色，需点击选中 → 选择园区类型<br>
             拖动顶点可调整形状<br><br>
@@ -72,6 +73,10 @@
         <div class="user-img-wrap" id="user-imgWrap">
             <img id="user-mainImg" src="" alt="" draggable="false">
             <canvas id="polyCanvas"></canvas>
+            <div class="img-loading-overlay hidden" id="img-loading">
+                <div class="img-loading-spinner"></div>
+                <div class="img-loading-text">加载中...</div>
+            </div>
         </div>
     </div>
 

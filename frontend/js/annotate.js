@@ -54,10 +54,14 @@ const Annotate = (function() {
         });
     }
 
+    let _maskUrl = null;
+    let _lastNatW = null;
+    let _lastNatH = null;
+
     async function loadImage(unitInfo) {
         const imgEl = document.getElementById('user-mainImg');
         const imgUrl = unitInfo.image_url;
-        const maskUrl = unitInfo.mask_url;
+        _maskUrl = unitInfo.mask_url || null;
 
         // 存储 judge_shp 的多边形数据
         polygonPixels = unitInfo.polygon_pixels || null;
@@ -66,54 +70,39 @@ const Annotate = (function() {
             const img = new Image();
             img.crossOrigin = 'anonymous';
             img.onload = () => {
-                // 先设 src
+                const natW = img.naturalWidth;
+                const natH = img.naturalHeight;
                 imgEl.src = imgUrl;
-                // 用 rAF 等待浏览器布局完成（与 img 实际渲染尺寸对齐）
-                const apply = () => syncCanvasSize(img, maskUrl).then(resolve, resolve);
-                if (imgEl.complete && imgEl.naturalWidth) {
-                    apply();
-                } else {
-                    imgEl.onload = apply;
-                }
+                resolve({ natW, natH, maskUrl: _maskUrl });
             };
             img.onerror = () => reject(new Error('原图加载失败'));
             img.src = imgUrl;
         });
     }
 
-    function syncCanvasSize(img, maskUrl) {
-        const imgEl = document.getElementById('user-mainImg');
+    function renderOverlay(natW, natH) {
+        _lastNatW = natW;
+        _lastNatH = natH;
         const maskC = document.getElementById('user-maskCanvas');
         const bboxC = document.getElementById('user-bboxCanvas');
-
-        // 取 img 元素的实际渲染尺寸（受 object-fit: contain 影响）
-        const rect = imgEl.getBoundingClientRect();
-        const w = Math.max(1, Math.round(rect.width));
-        const h = Math.max(1, Math.round(rect.height));
-
-        [maskC, bboxC].forEach(c => {
-            c.width = w;
-            c.height = h;
-            c.style.width = w + 'px';
-            c.style.height = h + 'px';
-            // canvas 绝对定位到与 img 重合
-            c.style.left = rect.left - imgEl.parentElement.getBoundingClientRect().left + 'px';
-            c.style.top  = rect.top  - imgEl.parentElement.getBoundingClientRect().top  + 'px';
-        });
-        // 缓存原图像素尺寸（用于 bbox 缩放）
-        const natW = imgEl.naturalWidth || img.naturalWidth;
-        const natH = imgEl.naturalHeight || img.naturalHeight;
+        const w = maskC.width;
+        const h = maskC.height;
         maskC._natW = natW;
         maskC._natH = natH;
         bboxC._natW = natW;
         bboxC._natH = natH;
 
         if (polygonPixels && polygonPixels.length > 0) {
-            // judge_shp: 用多边形渲染 overlay
             drawPolygonOverlay(polygonPixels, w, h, natW, natH);
-            return Promise.resolve(drawBboxes());
+            drawBboxes();
+            return;
         }
-        return drawMask(maskUrl, w, h).then(drawBboxes);
+        return drawMask(_maskUrl, w, h).then(function() { drawBboxes(); });
+    }
+
+    function reRender() {
+        if (_lastNatW == null || _lastNatH == null) return;
+        return renderOverlay(_lastNatW, _lastNatH);
     }
 
     async function drawMask(maskUrl, dispW, dispH) {
@@ -223,7 +212,8 @@ const Annotate = (function() {
     }
 
     return {
-        setUnit, getUnit, loadImage, drawBboxes, fillBottomInfo, save,
+        setUnit, getUnit, loadImage, renderOverlay, reRender,
+        drawBboxes, fillBottomInfo, save,
         setOnSaved, setStatusMap,
         getParkType, setParkType, getTransModes, toggleTransMode,
         resetTypeAndTrans,
