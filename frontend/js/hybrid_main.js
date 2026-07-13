@@ -66,6 +66,7 @@
     try { tasks = await API.userTasks(); } catch (e) {
         toast('加载任务失败: ' + e.message); return;
     }
+    var _prefetchedDetail = null;  // 并行预取的 unit 详情缓存
     var hybridTasks = tasks.filter(function(t) { return t.task_type === 'hybrid'; });
     if (hybridTasks.length === 0 && tasks.length > 0) {
         var ft = tasks[0];
@@ -632,18 +633,21 @@
         setText('user-vCoord', (u.lat != null) ? u.lat + ', ' + u.lng : '-');
 
         try {
-            var detail = await API.getUnit(curTask.task_id, curTask.group_id, u.id);
+            // 使用并行预取的详情（如果有），否则发起 API 请求
+            var detail = (_prefetchedDetail && _prefetchedDetail._unitId === u.id)
+                ? _prefetchedDetail : await API.getUnit(curTask.task_id, curTask.group_id, u.id);
+            _prefetchedDetail = null;  // 用完清除
             var imgEl = $('user-mainImg');
             imgEl.onload = function() {
                 nW = this.naturalWidth; nH = this.naturalHeight;
                 calcRect();
+                hideImgLoading();     // 图片解码完立即显示，mask 叠加层同步渲染很快
+                prefetchNextUnit(idx);
                 // Phase 1：渲染高亮区域（mask 或 shp 多边形 overlay）
                 if (phase === 1) {
                     renderMaskOverlay(detail.mask_url, u.bbox, detail.polygon_pixels);
                 }
                 drawAll();
-                hideImgLoading();  // 图片加载完毕
-                prefetchNextUnit(idx);  // 低优先级预加载下一张图片
             };
             imgEl.onerror = function() {
                 hideImgLoading();
@@ -706,12 +710,13 @@
             if (imgEl.complete && imgEl.naturalWidth) {
                 nW = imgEl.naturalWidth; nH = imgEl.naturalHeight;
                 calcRect();
+                hideImgLoading();
+                prefetchNextUnit(idx);
                 // 图片已加载完成：Phase 1 展示高亮区域
                 if (phase === 1) {
                     renderMaskOverlay(detail.mask_url, u.bbox, detail.polygon_pixels);
                 }
                 drawAll();
-                prefetchNextUnit(idx);
             }
 
             if (u.lat != null && u.lng != null) {
@@ -749,11 +754,29 @@
         // 立即显示加载遮罩（直接操作 DOM，不设 _imgLoading 避免阻塞 selectUnit）
         var ov = $('img-loading');
         if (ov) ov.classList.remove('hidden');
+
+        // 本地查找下一个未完成的 unit（无网络开销）
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
         try {
-            var resp = await API.submitUnit(curTask.task_id, curTask.group_id, curUnit.id, {
+            // 并行发起：保存 + 下一个 unit 详情（节省一次网络往返）
+            var savePromise = API.submitUnit(curTask.task_id, curTask.group_id, curUnit.id, {
                 has_park: false, result: '否',
                 polygons: [], transport_modes: [], comment: ''
             });
+            var detailPromise = nextUnit
+                ? API.getUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+                : Promise.resolve(null);
+
+            var results = await Promise.all([savePromise, detailPromise]);
+            var resp = results[0];
+            _prefetchedDetail = results[1];
+            if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit.id;
+
             if (resp && resp.ok) {
                 statusMap[String(curUnit.id)] = { done: true, has_park: false, updated_at: new Date().toISOString() };
                 renderUnitList();
@@ -761,11 +784,19 @@
                 setText('user-vStatus', '已完成: 否');
                 toast('已保存: 否');
                 updateToggleBtn();
-                await jumpToNextPending();
+                if (nextUnit) {
+                    await selectUnit(nextUnit, nextIdx);
+                } else {
+                    if (ov) ov.classList.add('hidden');
+                    renderUnitList();
+                    highlightCurrent(curUnit ? curUnit.id : -1);
+                }
             } else {
+                _prefetchedDetail = null;
                 if (ov) ov.classList.add('hidden');
             }
         } catch (e) {
+            _prefetchedDetail = null;
             if (ov) ov.classList.add('hidden');
             toast('保存失败: ' + e.message);
         }
@@ -869,10 +900,33 @@
             return;
         }
         showImgLoading();  // 立即显示加载中，不等保存完成
-        var saved = await saveHybrid();
-        if (saved === null) { hideImgLoading(); return; }
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = saveHybrid();
+        var detailPromise = nextUnit
+            ? API.getUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }
         _imgLoading = false;  // 临时解除锁，selectUnit 内部会立即重新加锁
-        await jumpToNextPending();
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function onPrev() {
@@ -892,10 +946,33 @@
     async function onNext() {
         if (!curUnit || _imgLoading) return;
         showImgLoading();  // 立即显示加载中
-        var saved = await saveHybrid();
-        if (saved === null) { hideImgLoading(); return; }
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = saveHybrid();
+        var detailPromise = nextUnit
+            ? API.getUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }
         _imgLoading = false;  // 临时解除锁
-        await jumpToNextPending();
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function jumpToNextPending() {

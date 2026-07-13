@@ -398,27 +398,40 @@
                 </div>
             </div>`;
 
-            // 一致性分析
+            // 一致性分析 — 三个维度
             const ag = d.agreement;
-            const agreementHtml = `
-            <div class="admin-detail-section">
-                <h4>交叉标注一致性</h4>
-                <div class="admin-agree-stats">
-                    <div class="admin-agree-card">
-                        <div class="val">${ag.total_overlap}</div>
-                        <div class="lbl">重叠 unit（被≥2组标注）</div>
+            const dims = [
+                { key: 'binary',         title: '是否判定',   icon: '🔍' },
+                { key: 'park_type',      title: '园区类型',   icon: '🏷️' },
+                { key: 'transport_modes',title: '运输方式',   icon: '🚛' },
+            ];
+
+            let agreementHtml = '<div class="admin-detail-section"><h4>交叉标注一致性</h4>';
+            let hasAnyData = false;
+            dims.forEach(dim => {
+                const a = ag[dim.key];
+                if (!a) return;
+                if (a.total_overlap === 0) {
+                    agreementHtml += `<p class="admin-detail-none" style="font-size:11px">${dim.icon} ${dim.title}：暂无重叠标注数据</p>`;
+                    return;
+                }
+                hasAnyData = true;
+                const consistentCls = a.inconsistent === 0 ? ' agree' : '';
+                agreementHtml += `
+                <div class="admin-agree-dim">
+                    <div class="admin-agree-dim-head">${dim.icon} ${dim.title}</div>
+                    <div class="admin-agree-stats mini">
+                        <div class="admin-agree-card"><div class="val">${a.total_overlap}</div><div class="lbl">重叠</div></div>
+                        <div class="admin-agree-card${consistentCls}"><div class="val">${a.consistent}</div><div class="lbl">一致</div></div>
+                        <div class="admin-agree-card${a.inconsistent > 0 ? ' disagree' : ''}"><div class="val">${a.inconsistent}</div><div class="lbl">不一致 ${a.inconsistent_ratio}%</div></div>
                     </div>
-                    <div class="admin-agree-card agree">
-                        <div class="val">${ag.consistent}</div>
-                        <div class="lbl">一致</div>
-                    </div>
-                    <div class="admin-agree-card disagree">
-                        <div class="val">${ag.inconsistent}</div>
-                        <div class="lbl">不一致（${ag.inconsistent_ratio}%）</div>
-                    </div>
-                </div>
-                ${ag.details.length > 0 ? renderDisagreeDetails(ag.details) : '<p class="admin-detail-none">' + (ag.total_overlap === 0 ? '暂无重叠标注数据' : '标注全部一致 ✓') + '</p>'}
-            </div>`;
+                    ${a.details.length > 0 ? renderDisagreeDetails(dim.key, dim.title, a.details) : '<p class="admin-detail-none" style="font-size:11px">标注全部一致 ✓</p>'}
+                </div>`;
+            });
+            if (!hasAnyData) {
+                agreementHtml += '<p class="admin-detail-none">暂无重叠标注数据（重叠系数为 1 或无标注数据）</p>';
+            }
+            agreementHtml += '</div>';
 
             body.innerHTML = metaHtml + progressHtml + agreementHtml;
 
@@ -427,11 +440,18 @@
         }
     }
 
-    function renderDisagreeDetails(details) {
+    function renderDisagreeDetails(dimKey, dimTitle, details) {
         const items = details.map(d => {
             const annRows = d.annotations.map(a => {
-                const rCls = a.result === '是' ? 'yes' : '';
-                return `<span class="di-row"><span class="di-gid">${a.group_id}</span><span class="di-result ${rCls}">${a.result}</span></span>`;
+                let valStr;
+                if (dimKey === 'binary') {
+                    valStr = a.value;
+                } else {
+                    valStr = Array.isArray(a.value) && a.value.length > 0
+                        ? a.value.join(', ') : '（无）';
+                }
+                const rCls = (dimKey === 'binary' && valStr === '是') ? 'yes' : '';
+                return `<span class="di-row"><span class="di-gid">${a.group_id}</span><span class="di-result ${rCls}">${valStr}</span></span>`;
             }).join('');
             const extra = typeof d.component_id === 'number'
                 ? ` · 连通集 #${d.component_id}`
@@ -441,7 +461,7 @@
                 ${annRows}
             </div>`;
         }).join('');
-        return `<div class="admin-disagree-list">${items}</div>`;
+        return `<details class="admin-disagree-details"><summary>查看 ${details.length} 处不一致</summary><div class="admin-disagree-list">${items}</div></details>`;
     }
 
     // ===== 删除任务 =====

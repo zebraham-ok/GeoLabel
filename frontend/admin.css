@@ -258,14 +258,34 @@ a:hover { text-decoration: underline; }
 .admin-agree-stats {
     display: flex; gap: 16px; margin-bottom: 10px;
 }
+.admin-agree-stats.mini { gap: 8px; margin-bottom: 6px; }
 .admin-agree-card {
     flex: 1; background: #16213e; border: 1px solid #333;
     border-radius: 4px; padding: 10px 12px; text-align: center;
 }
+.admin-agree-stats.mini .admin-agree-card { padding: 6px 8px; }
+.admin-agree-stats.mini .admin-agree-card .val { font-size: 16px; }
 .admin-agree-card .val { font-size: 22px; font-weight: bold; }
 .admin-agree-card .lbl { font-size: 10px; color: #888; margin-top: 2px; }
 .admin-agree-card.agree .val { color: #4ecca3; }
 .admin-agree-card.disagree .val { color: #e94560; }
+/* 每个维度块 */
+.admin-agree-dim {
+    margin-bottom: 14px; padding-bottom: 10px;
+    border-bottom: 1px solid #222;
+}
+.admin-agree-dim:last-child { border-bottom: none; }
+.admin-agree-dim-head {
+    font-size: 12px; font-weight: bold; color: #ccc; margin-bottom: 6px;
+}
+/* 不一致详情折叠 */
+.admin-disagree-details {
+    margin-top: 4px;
+}
+.admin-disagree-details summary {
+    font-size: 11px; color: #e94560; cursor: pointer; padding: 2px 0;
+}
+.admin-disagree-details summary:hover { color: #ff6b6b; }
 /* 不一致详情 */
 .admin-disagree-list {
     max-height: 200px; overflow-y: auto;

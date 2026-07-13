@@ -66,6 +66,7 @@
     let ctx = null;
     let mousePos = { x: 0, y: 0 };
     let _prefetchAbort = null;  // 预加载取消控制器
+    let _prefetchedDetail = null;  // 并行预取的 unit 详情缓存
 
     // ===== 加载中遮罩 =====
     let _imgLoading = false;
@@ -568,7 +569,10 @@
 
         // 加载图像
         try {
-            const detail = await API.getPoiUnit(curTask.task_id, curTask.group_id, u.id);
+            // 使用并行预取的详情（如果有），否则发起 API 请求
+            const detail = (_prefetchedDetail && _prefetchedDetail._unitId === u.id)
+                ? _prefetchedDetail : await API.getPoiUnit(curTask.task_id, curTask.group_id, u.id);
+            _prefetchedDetail = null;  // 用完清除
             const imgEl = $('user-mainImg');
             imgEl.onload = function() {
                 hideImgLoading();
@@ -693,10 +697,33 @@
     async function onSaveAndNext() {
         if (!curUnit || _imgLoading) return;
         showImgLoading();  // 立即显示加载中
-        const saved = await savePOI();
-        if (saved === null) { hideImgLoading(); return; }  // 未通过验证
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = savePOI();
+        var detailPromise = nextUnit
+            ? API.getPoiUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }  // 未通过验证
         _imgLoading = false;  // 临时解除锁，selectUnit 内部会立即重新加锁
-        await jumpToNextPending();
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function onPrev() {
@@ -716,10 +743,33 @@
     async function onNext() {
         if (!curUnit || _imgLoading) return;
         showImgLoading();  // 立即显示加载中
-        const saved = await savePOI();
-        if (saved === null) { hideImgLoading(); return; }
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = savePOI();
+        var detailPromise = nextUnit
+            ? API.getPoiUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }
         _imgLoading = false;  // 临时解除锁
-        await jumpToNextPending();
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function jumpToNextPending() {

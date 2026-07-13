@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import string
 import threading
 import time
@@ -130,6 +131,10 @@ image_cache = ImageLRUCache(max_size_bytes=512 * 1024 * 1024)  # 图片 512MB LR
 ADMIN_FILE = ACCOUNTS_DIR / "admin.json"
 USER_FILE = ACCOUNTS_DIR / "user.json"
 AMAP_CONFIG_FILE = ROOT / "amap_config.json"
+SERVER_CONFIG_FILE = ROOT / "server_config.json"
+
+# 并发写保护锁：防止 user.json 的 read-modify-write 竞态
+_user_file_lock = threading.Lock()
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="")
 
@@ -157,9 +162,20 @@ def load_json(path: Path, default: Any = None) -> Any:
         return default if default is not None else {}
 
 
-def save_json(path: Path, data: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_json(path: Path, data: Any, atomic: bool = True) -> None:
+    """原子写入 JSON：先写临时文件再 rename，避免并发读取到半写文件"""
+    if atomic:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(path)          # 原子 rename 覆盖
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def gen_password(length: int = 8) -> str:
@@ -332,16 +348,19 @@ def _parse_shp_filename(filename: str) -> Optional[dict]:
 
 # ==================== judge_shp: COCO 多边形处理 ====================
 _COCO_CACHE = {}  # path → {annotations_by_id, images_by_id}
+_coco_cache_lock = threading.Lock()
 
 
 def _load_coco_data(dataset_path: Path) -> Dict[str, Any]:
-    """加载 COCO JSON，返回 {annotations_by_id, images_by_id}（带缓存）"""
+    """加载 COCO JSON，返回 {annotations_by_id, images_by_id}（带缓存，线程安全）"""
     coco_files = list(dataset_path.glob("*_coco_clean.json")) + list(dataset_path.glob("*_coco.json"))
     if not coco_files:
         return {}
     json_path = str(coco_files[0])
-    if json_path in _COCO_CACHE:
-        return _COCO_CACHE[json_path]
+
+    with _coco_cache_lock:
+        if json_path in _COCO_CACHE:
+            return _COCO_CACHE[json_path]
 
     with open(coco_files[0], "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -350,7 +369,8 @@ def _load_coco_data(dataset_path: Path) -> Dict[str, Any]:
     img_by_id = {i["id"]: i for i in data.get("images", [])}
 
     result = {"annotations_by_id": ann_by_id, "images_by_id": img_by_id}
-    _COCO_CACHE[json_path] = result
+    with _coco_cache_lock:
+        _COCO_CACHE[json_path] = result
     return result
 
 
@@ -1429,29 +1449,30 @@ def admin_create_task():
 
     # ===== 生成账号 =====
     task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
-    users_data = load_json(USER_FILE, {"users": []})
-    created_groups = []
-    for i, units in enumerate(groups_units):
-        gid = f"g{i+1:02d}"
-        username = f"{task_id}_{gid}"
-        password = gen_password(8)
-        created_groups.append({
-            "group_id": gid,
-            "username": username,
-            "password": password,
-            "unit_count": len(units),
-            "units": units,
-            "progress": {"done": 0, "total": len(units)},
-        })
-        users_data.setdefault("users", []).append({
-            "username": username,
-            "password": password,
-            "task_id": task_id,
-            "group_id": gid,
-            "task_type": ds_type,
-            "created_at": datetime.now().isoformat(),
-        })
-    save_json(USER_FILE, users_data)
+    with _user_file_lock:  # 并发保护：防止多个管理员同时创建任务时 user.json 竞态
+        users_data = load_json(USER_FILE, {"users": []})
+        created_groups = []
+        for i, units in enumerate(groups_units):
+            gid = f"g{i+1:02d}"
+            username = f"{task_id}_{gid}"
+            password = gen_password(8)
+            created_groups.append({
+                "group_id": gid,
+                "username": username,
+                "password": password,
+                "unit_count": len(units),
+                "units": units,
+                "progress": {"done": 0, "total": len(units)},
+            })
+            users_data.setdefault("users", []).append({
+                "username": username,
+                "password": password,
+                "task_id": task_id,
+                "group_id": gid,
+                "task_type": ds_type,
+                "created_at": datetime.now().isoformat(),
+            })
+        save_json(USER_FILE, users_data)
 
     # ===== 持久化 task =====
     task = {
@@ -1524,6 +1545,7 @@ def admin_task_detail(task_id):
 
     # ---- 交叉标注一致性分析 ----
     # key = "image文件名|component_id" → 跨组匹配
+    # 三个维度分别计算：是否判定、园区类型、运输方式
     unit_ann_map: Dict[str, list] = {}
     task_type = task.get("task_type", "judge")
 
@@ -1537,14 +1559,30 @@ def admin_task_detail(task_id):
                 ann = json.load(fp)
             unit_id = ann.get("unit_id")
 
-            # hybrid 模式：用 has_park 判断 result
+            # ---- 统一提取三个维度的标注信息 ----
+            # 1) 是否判定
             if task_type == "hybrid":
-                result = "是" if ann.get("has_park") else "否"
+                binary = "是" if ann.get("has_park") else "否"
+            elif task_type == "poi":
+                binary = "是" if ann.get("poi_labels") else "否"
             else:
-                result = ann.get("result", "")
+                binary = ann.get("result", "")
 
-            if not result:
+            if not binary:
                 continue
+
+            # 2) 园区类型（归一化为排序后的标签列表）
+            if task_type == "hybrid":
+                labels = sorted({p["label"] for p in ann.get("polygons", []) if p.get("label")})
+            elif task_type == "poi":
+                labels = sorted(ann.get("poi_labels", []))
+            else:
+                pt = ann.get("park_type", "")
+                labels = [pt] if pt else []
+
+            # 3) 运输方式（排序后的列表）
+            transport_modes = sorted(ann.get("transport_modes", []))
+
             # 找到该 unit 的 image + component_id
             unit_info = next((u for u in group.get("units", []) if u["id"] == unit_id), None)
             if not unit_info:
@@ -1557,33 +1595,50 @@ def admin_task_detail(task_id):
             unit_ann_map[key].append({
                 "group_id": gid,
                 "unit_id": unit_id,
-                "result": result,
-                "park_type": ann.get("park_type", ""),
-                "transport_modes": ann.get("transport_modes", []),
-                "has_park": ann.get("has_park") if task_type == "hybrid" else None,
-                "polygons": ann.get("polygons", []) if task_type == "hybrid" else None,
+                "binary": binary,
+                "labels": labels,
+                "transport_modes": transport_modes,
             })
 
-    total_overlap = 0   # 被 ≥2 组标注的 unit 数
-    consistent = 0
-    inconsistent_details = []
+    # ---- 三个维度分别计算一致性 ----
+    def _compute_agreement(ann_by_key, field):
+        """对某个 field 计算跨组标注一致性"""
+        total = 0
+        consistent = 0
+        details = []
+        for key, ann_list in ann_by_key.items():
+            if len(ann_list) < 2:
+                continue
+            total += 1
+            vals = [a[field] for a in ann_list]
+            # binary 直接比较字符串；labels/modes 转为 tuple 后比较集合
+            if field == "binary":
+                equal = len(set(vals)) == 1
+            else:
+                equal = len(set(tuple(v) for v in vals)) == 1
+            if equal:
+                consistent += 1
+            else:
+                img, comp_id = key.split("|", 1)
+                details.append({
+                    "image": img,
+                    "component_id": int(comp_id) if comp_id.isdigit() else comp_id,
+                    "annotations": [
+                        {"group_id": a["group_id"], "value": a[field]}
+                        for a in ann_list
+                    ]
+                })
+        return {
+            "total_overlap": total,
+            "consistent": consistent,
+            "inconsistent": total - consistent,
+            "inconsistent_ratio": round((total - consistent) / total * 100, 1) if total > 0 else 0,
+            "details": details
+        }
 
-    for key, ann_list in unit_ann_map.items():
-        if len(ann_list) < 2:
-            continue
-        total_overlap += 1
-        results = [a["result"] for a in ann_list]
-        if len(set(results)) == 1:
-            consistent += 1
-        else:
-            img, comp_id = key.split("|", 1)
-            inconsistent_details.append({
-                "image": img,
-                "component_id": int(comp_id) if comp_id.isdigit() else comp_id,
-                "annotations": ann_list
-            })
-
-    inconsistent = total_overlap - consistent
+    agreement_binary = _compute_agreement(unit_ann_map, "binary")
+    agreement_labels = _compute_agreement(unit_ann_map, "labels")
+    agreement_transport = _compute_agreement(unit_ann_map, "transport_modes")
 
     total_done = sum(g["progress"]["done"] for g in task["groups"])
     total_units = sum(g["unit_count"] for g in task["groups"])
@@ -1610,11 +1665,9 @@ def admin_task_detail(task_id):
             "pct": round(total_done / total_units * 100, 1) if total_units > 0 else 0
         },
         "agreement": {
-            "total_overlap": total_overlap,
-            "consistent": consistent,
-            "inconsistent": inconsistent,
-            "inconsistent_ratio": round(inconsistent / total_overlap * 100, 1) if total_overlap > 0 else 0,
-            "details": inconsistent_details
+            "binary": agreement_binary,
+            "park_type": agreement_labels,
+            "transport_modes": agreement_transport
         }
     })
 
@@ -1636,17 +1689,17 @@ def admin_delete_task(task_id):
     task_name = task.get("task_name", task_id)
 
     # 1. 从 user.json 中移除关联账号
-    users_data = load_json(USER_FILE, {"users": []})
-    original_count = len(users_data.get("users", []))
-    users_data["users"] = [
-        u for u in users_data.get("users", [])
-        if u.get("task_id") != task_id
-    ]
-    save_json(USER_FILE, users_data)
+    with _user_file_lock:  # 并发保护
+        users_data = load_json(USER_FILE, {"users": []})
+        original_count = len(users_data.get("users", []))
+        users_data["users"] = [
+            u for u in users_data.get("users", [])
+            if u.get("task_id") != task_id
+        ]
+        save_json(USER_FILE, users_data)
     removed_accounts = original_count - len(users_data.get("users", []))
 
     # 2. 删除标注目录
-    import shutil
     annot_dir = ANNOTATIONS_DIR / task_id
     if annot_dir.exists():
         shutil.rmtree(str(annot_dir))
@@ -1719,12 +1772,28 @@ def admin_download_accounts(task_id):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="物流园区判读系统")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
-    parser.add_argument("--port", type=int, default=8081, help="监听端口")
-    parser.add_argument("--prod", action="store_true", help="生产模式（使用 Waitress，否则用 Flask 多线程开发服务器）")
-    parser.add_argument("--threads", type=int, default=20, help="工作线程数（默认 20，适配 138 并发用户）")
-    parser.add_argument("--debug", action="store_true", help="开启 Flask debug 模式（仅开发）")
+    # 1. 先加载配置文件中的默认值
+    config_defaults: Dict[str, Any] = {}
+    if SERVER_CONFIG_FILE.exists():
+        try:
+            with open(SERVER_CONFIG_FILE, "r", encoding="utf-8") as f:
+                config_defaults = json.load(f)
+            print(f"[config] 已加载服务器配置文件: {SERVER_CONFIG_FILE}")
+        except Exception as e:
+            print(f"[warn] 服务器配置文件读取失败: {e}，使用内置默认值")
+
+    # 2. 命令行参数优先级高于配置文件
+    parser = argparse.ArgumentParser(
+        description="物流园区判读系统（配置文件: backend/server_config.json）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--host", default=config_defaults.get("host", "0.0.0.0"), help="监听地址")
+    parser.add_argument("--port", type=int, default=config_defaults.get("port", 8081), help="监听端口")
+    parser.add_argument("--threads", type=int, default=config_defaults.get("threads", 20), help="工作线程数")
+    parser.add_argument("--prod", action="store_true", default=config_defaults.get("prod", False),
+                        help="生产模式（使用 Waitress）")
+    parser.add_argument("--debug", action="store_true", default=config_defaults.get("debug", False),
+                        help="开启 Flask debug 模式（仅开发）")
     args = parser.parse_args()
 
     print(f"Datasets Judge: {DATASETS_JUDGE_DIR}")

@@ -23,6 +23,7 @@ env/
 .env
 .env.local
 backend/amap_config.json
+backend/server_config.json
 *账号.txt
 
 # =============================================================
