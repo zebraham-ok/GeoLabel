@@ -79,7 +79,7 @@ class MemoryCache:
 class ImageLRUCache:
     """线程安全的 LRU 图片缓存，带内存上限（默认 512 MB）"""
 
-    def __init__(self, max_size_bytes: int = 512 * 1024 * 1024):
+    def __init__(self, max_size_bytes: int = int(1.5 * 1024 * 1024 * 1024)):
         self._max_size = max_size_bytes
         self._store: Dict[str, bytes] = {}       # key -> 图片二进制
         self._access: Dict[str, float] = {}       # key -> 最后访问时间戳
@@ -126,7 +126,7 @@ task_cache = MemoryCache(default_ttl=60.0)       # task JSON 60 秒缓存
 status_cache = MemoryCache(default_ttl=15.0)      # unit 状态 15 秒缓存
 annotation_cache = MemoryCache(default_ttl=30.0)  # 标注内容 30 秒缓存
 poi_mem_cache = MemoryCache(default_ttl=3600.0)   # POI 结果 1 小时缓存
-image_cache = ImageLRUCache(max_size_bytes=512 * 1024 * 1024)  # 图片 512MB LRU
+image_cache = ImageLRUCache(max_size_bytes=int(1.5 * 1024 * 1024 * 1024))  # 图片 1.5GB LRU
 
 ADMIN_FILE = ACCOUNTS_DIR / "admin.json"
 USER_FILE = ACCOUNTS_DIR / "user.json"

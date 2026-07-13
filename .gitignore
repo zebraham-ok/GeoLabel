@@ -25,6 +25,8 @@ env/
 backend/amap_config.json
 backend/server_config.json
 *账号.txt
+*.xlsx
+*.xls
 
 # =============================================================
 # 图片与数据文件
