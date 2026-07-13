@@ -77,40 +77,32 @@ class MemoryCache:
 
 # ==================== 图片 LRU 内存缓存（减少磁盘 I/O） ====================
 class ImageLRUCache:
-    """线程安全的 LRU 图片缓存，带内存上限（默认 512 MB）"""
+    """线程安全的 LRU 图片缓存，用 OrderedDict 实现 O(1) 驱逐"""
 
-    def __init__(self, max_size_bytes: int = int(1.5 * 1024 * 1024 * 1024)):
+    def __init__(self, max_size_bytes: int = int(512 * 1024 * 1024)):
         self._max_size = max_size_bytes
-        self._store: Dict[str, bytes] = {}       # key -> 图片二进制
-        self._access: Dict[str, float] = {}       # key -> 最后访问时间戳
+        from collections import OrderedDict
+        self._store: OrderedDict = OrderedDict()  # ordered by access time, oldest first
         self._lock = threading.Lock()
         self._current_size = 0
 
     def get(self, key: str) -> Optional[bytes]:
         with self._lock:
-            data = self._store.get(key)
+            data = self._store.pop(key, None)
             if data is not None:
-                self._access[key] = time.time()
+                self._store[key] = data  # move to end (most recent)
             return data
 
     def set(self, key: str, data: bytes) -> None:
         with self._lock:
-            # 如果 key 已存在，先减去旧大小
-            old = self._store.get(key)
+            old = self._store.pop(key, None)
             if old is not None:
                 self._current_size -= len(old)
-
             self._store[key] = data
-            self._access[key] = time.time()
             self._current_size += len(data)
-
-            # LRU 驱逐：从最久未访问的开始
             while self._current_size > self._max_size and self._store:
-                lru_key = min(self._access, key=lambda k: self._access[k])
-                removed = self._store.pop(lru_key, None)
-                self._access.pop(lru_key, None)
-                if removed:
-                    self._current_size -= len(removed)
+                _, removed = self._store.popitem(last=False)
+                self._current_size -= len(removed)
 
     def stats(self) -> Dict[str, Any]:
         with self._lock:
@@ -126,7 +118,7 @@ task_cache = MemoryCache(default_ttl=60.0)       # task JSON 60 秒缓存
 status_cache = MemoryCache(default_ttl=15.0)      # unit 状态 15 秒缓存
 annotation_cache = MemoryCache(default_ttl=30.0)  # 标注内容 30 秒缓存
 poi_mem_cache = MemoryCache(default_ttl=3600.0)   # POI 结果 1 小时缓存
-image_cache = ImageLRUCache(max_size_bytes=int(1.5 * 1024 * 1024 * 1024))  # 图片 1.5GB LRU
+image_cache = ImageLRUCache(max_size_bytes=int(512 * 1024 * 1024))  # 图片 512MB LRU
 
 ADMIN_FILE = ACCOUNTS_DIR / "admin.json"
 USER_FILE = ACCOUNTS_DIR / "user.json"
@@ -902,12 +894,16 @@ def submit_unit(task_id, group_id, unit_id):
         return jsonify({"error": "未登录"}), 401
     username = session["user"]
 
-    # 权限校验
-    task_file = TASKS_DIR / f"{task_id}.json"
-    if not task_file.exists():
-        return jsonify({"error": "task 不存在"}), 404
-    with open(task_file, "r", encoding="utf-8") as f:
-        task = json.load(f)
+    # 权限校验（复用缓存，避免高并发下重复 JSON 解析）
+    task_cache_key = f"task:{task_id}"
+    task = task_cache.get(task_cache_key)
+    if task is None:
+        task_file = TASKS_DIR / f"{task_id}.json"
+        if not task_file.exists():
+            return jsonify({"error": "task 不存在"}), 404
+        with open(task_file, "r", encoding="utf-8") as f:
+            task = json.load(f)
+        task_cache.set(task_cache_key, task)
     group = next((g for g in task.get("groups", []) if g["group_id"] == group_id), None)
     if not group or group["username"] != username:
         return jsonify({"error": "无权访问"}), 403
@@ -1008,11 +1004,15 @@ def submit_poi_unit(task_id, group_id, unit_id):
         return jsonify({"error": "未登录"}), 401
     username = session["user"]
 
-    task_file = TASKS_DIR / f"{task_id}.json"
-    if not task_file.exists():
-        return jsonify({"error": "task 不存在"}), 404
-    with open(task_file, "r", encoding="utf-8") as f:
-        task = json.load(f)
+    task_cache_key = f"task:{task_id}"
+    task = task_cache.get(task_cache_key)
+    if task is None:
+        task_file = TASKS_DIR / f"{task_id}.json"
+        if not task_file.exists():
+            return jsonify({"error": "task 不存在"}), 404
+        with open(task_file, "r", encoding="utf-8") as f:
+            task = json.load(f)
+        task_cache.set(task_cache_key, task)
     group = next((g for g in task.get("groups", []) if g["group_id"] == group_id), None)
     if not group or group["username"] != username:
         return jsonify({"error": "无权访问"}), 403
@@ -1789,7 +1789,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--host", default=config_defaults.get("host", "0.0.0.0"), help="监听地址")
     parser.add_argument("--port", type=int, default=config_defaults.get("port", 8081), help="监听端口")
-    parser.add_argument("--threads", type=int, default=config_defaults.get("threads", 20), help="工作线程数")
+    parser.add_argument("--threads", type=int, default=config_defaults.get("threads", 80), help="工作线程数")
     parser.add_argument("--prod", action="store_true", default=config_defaults.get("prod", False),
                         help="生产模式（使用 Waitress）")
     parser.add_argument("--debug", action="store_true", default=config_defaults.get("debug", False),
@@ -1809,7 +1809,7 @@ if __name__ == "__main__":
             from waitress import serve
             print(f"Starting Waitress on {args.host}:{args.port} with {args.threads} threads")
             serve(app, host=args.host, port=args.port, threads=args.threads,
-                  connection_limit=200, channel_timeout=120)
+                  connection_limit=500, channel_timeout=60)
         except ImportError:
             print("[WARN] waitress 未安装，回退到 Flask 多线程模式")
             print("[TIP]  安装: D:\\Coding\\python.exe -m pip install waitress")
