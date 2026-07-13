@@ -31,7 +31,7 @@
             <b>物流园区遥感判读系统</b><br>
             根据卫星影像判断高亮区域是否是物流园区。<br><br>
             <b>操作</b><br>
-            鼠标滚轮缩放图像 · 拖拽平移<br>
+            鼠标滚轮缩放图像 · 右键按住拖拽平移画布<br>
             底部选择园区类型 + 运输方式<br><br>
             <b>快捷键</b><br>
             <span class="hk">Y</span>是 <span class="hk">N</span>否 <span class="hk">U</span>不确定<br>
@@ -59,6 +59,10 @@
             <img id="user-mainImg" src="" alt="" draggable="false">
             <canvas id="user-maskCanvas"></canvas>
             <canvas id="user-bboxCanvas"></canvas>
+            <div class="img-loading-overlay hidden" id="img-loading">
+                <div class="img-loading-spinner"></div>
+                <div class="img-loading-text">加载中...</div>
+            </div>
         </div>
     </div>
 

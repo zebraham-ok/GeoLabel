@@ -65,6 +65,25 @@
     let nW, nH, dW, dH, dX, dY;
     let ctx = null;
     let mousePos = { x: 0, y: 0 };
+    let _prefetchAbort = null;  // 预加载取消控制器
+    let _prefetchedDetail = null;  // 并行预取的 unit 详情缓存
+
+    // ===== 加载中遮罩 =====
+    let _imgLoading = false;
+    function showImgLoading() {
+        _imgLoading = true;
+        const ov = $('img-loading');
+        if (ov) ov.classList.remove('hidden');
+    }
+    function hideImgLoading() {
+        _imgLoading = false;
+        const ov = $('img-loading');
+        if (ov) ov.classList.add('hidden');
+    }
+
+    // ===== 缩放与平移 =====
+    let _zoom = 1.0, _panX = 0, _panY = 0;
+    let _panning = false, _panStart = { x: 0, y: 0, panX: 0, panY: 0 };
 
     // ===== 加载任务 =====
     let tasks = [];
@@ -90,16 +109,22 @@
     try { statusMap = (await API.unitStatus(curTask.task_id, curTask.group_id)) || {}; }
     catch (e) { statusMap = {}; }
 
-    // ===== 多边形绘制：画布尺寸计算 =====
-    function calcRect() {
-        if (!nW || !nH) return;
+    // ===== 多边形绘制：画布尺寸计算（含缩放和平移） =====
+    function _fitRect() {
         const wrap = $('user-imgWrap');
         const pw = wrap.clientWidth, ph = wrap.clientHeight;
         const s = Math.min(pw / nW, ph / nH);
-        dW = Math.round(nW * s);
-        dH = Math.round(nH * s);
-        dX = Math.round((pw - dW) / 2);
-        dY = Math.round((ph - dH) / 2);
+        const fitW = nW * s, fitH = nH * s;
+        return { w: fitW, h: fitH, x: (pw - fitW) / 2, y: (ph - fitH) / 2, s: s };
+    }
+
+    function calcRect() {
+        if (!nW || !nH) return;
+        const fit = _fitRect();
+        dW = Math.round(fit.w * _zoom);
+        dH = Math.round(fit.h * _zoom);
+        dX = Math.round(fit.x + _panX - (dW - fit.w) / 2);
+        dY = Math.round(fit.y + _panY - (dH - fit.h) / 2);
 
         const img = $('user-mainImg');
         img.style.position = 'absolute';
@@ -119,6 +144,8 @@
         canvas.height = dH;
         ctx = canvas.getContext('2d');
     }
+
+    function resetZoom() { _zoom = 1.0; _panX = 0; _panY = 0; }
 
     function px2pct(px, py) { return [(px / dW) * 100, (py / dH) * 100]; }
     function pct2px(px, py) { return [px * dW / 100, py * dH / 100]; }
@@ -285,6 +312,9 @@
             const old = p.label;
             if (old !== label) {
                 p.label = label;
+                curLabel = label;
+                updateLabelBtns();
+                $('poiToolbarActiveLabel').textContent = label;
                 drawAll();
                 toast('框 ' + (selectedPolyIdx + 1) + ': ' + (old || '未设定') + ' → ' + label);
             }
@@ -334,12 +364,45 @@
         $('poiToolbarHint').textContent = msg;
     }
 
-    // ===== 画布事件 =====
+    // ===== 画布事件（含缩放/平移） =====
     function attachCanvasEvents() {
         const canvas = $('polyCanvas');
+        const wrap = $('user-imgWrap');
+        const ZOOM_STEP = 1.12, ZOOM_MIN = 1.0, ZOOM_MAX = 8.0;
 
+        // ── 滚轮缩放（鼠标位置为中心缩放） ──
+        wrap.addEventListener('wheel', function(e) {
+            if (!curUnit || !nW || !nH) return;
+            e.preventDefault();
+            const fit = _fitRect();
+            const wr = wrap.getBoundingClientRect();
+            const cx = e.clientX - wr.left, cy = e.clientY - wr.top;
+            const fx = (cx - dX) / dW, fy = (cy - dY) / dH;
+            const newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+                _zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)));
+            if (Math.abs(newZoom - _zoom) < 0.001) return;
+            const ndW = fit.w * newZoom, ndH = fit.h * newZoom;
+            _panX = cx - fx * ndW - fit.x + (ndW - fit.w) / 2;
+            _panY = cy - fy * ndH - fit.y + (ndH - fit.h) / 2;
+            _zoom = newZoom;
+            calcRect();
+            drawAll();
+        }, { passive: false });
+
+        // ── 右键拖拽平移 ──
         canvas.addEventListener('mousedown', function(e) {
-            if (!curUnit || isDrawing) return;
+            if (!curUnit) return;
+            if (e.button === 2) {
+                if (isDrawing) return;
+                e.preventDefault();
+                _panning = true;
+                _panStart.x = e.clientX; _panStart.y = e.clientY;
+                _panStart.panX = _panX; _panStart.panY = _panY;
+                this.style.cursor = 'grabbing';
+                return;
+            }
+            // 左键：顶点拖动
+            if (isDrawing) return;
             const rect = this.getBoundingClientRect();
             const pct = px2pct(e.clientX - rect.left, e.clientY - rect.top);
             const ptHit = findPointAt(pct[0], pct[1], 1.5);
@@ -352,6 +415,14 @@
 
         canvas.addEventListener('mousemove', function(e) {
             if (!curUnit) return;
+            // 平移中
+            if (_panning) {
+                _panX = _panStart.panX + (e.clientX - _panStart.x);
+                _panY = _panStart.panY + (e.clientY - _panStart.y);
+                calcRect();
+                drawAll();
+                return;
+            }
             const rect = this.getBoundingClientRect();
             const pct = px2pct(e.clientX - rect.left, e.clientY - rect.top);
             mousePos = pct;
@@ -376,6 +447,11 @@
         document.addEventListener('mouseup', function() {
             if (draggingPoint) {
                 draggingPoint = null;
+                const cv = $('polyCanvas');
+                if (cv) cv.style.cursor = 'crosshair';
+            }
+            if (_panning) {
+                _panning = false;
                 const cv = $('polyCanvas');
                 if (cv) cv.style.cursor = 'crosshair';
             }
@@ -416,6 +492,8 @@
         canvas.addEventListener('dblclick', function(e) {
             if (!isDrawing || drawPts.length < 3) return;
             e.preventDefault();
+            // 双击时 click 先触发加了一个点，这里去掉那个多余点
+            drawPts.pop();
             finishPoly();
         });
 
@@ -429,9 +507,9 @@
             }
         });
 
-        // 窗口 resize 重算
+        // 窗口 resize 重算（重置缩放）
         window.addEventListener('resize', function() {
-            if (nW && nH) { calcRect(); drawAll(); }
+            if (nW && nH) { resetZoom(); calcRect(); drawAll(); }
         });
     }
 
@@ -452,7 +530,7 @@
             el.className = cls;
             el.dataset.unitId = u.id;
 
-            const title = (u.image || '').replace(/\.png$/i, '');
+            const title = shortFileName(u.image || '');
             const short = title.length > 20 ? title.substring(0, 20) + '...' : title;
             el.innerHTML =
                 '<div class="user-unit-title">#' + u.id + ' · ' + short + '</div>' +
@@ -478,23 +556,31 @@
 
     // ===== 选择 unit =====
     async function selectUnit(u, idx) {
+        if (_imgLoading) return;  // 防重复点击
+        showImgLoading();
+        resetZoom();  // 切换 unit 时恢复默认缩放
         curUnit = u;
         curIdx = idx;
         highlightCurrent(u.id);
         setText('user-counter', (idx + 1) + '/' + curTask.units.length);
-        setText('user-tname', u.image);
+        setText('user-tname', shortFileName(u.image));
         setText('user-vCoord', (u.lat != null) ? u.lat + ', ' + u.lng : '-');
         setText('user-vSize', (u.img_width && u.img_height) ? u.img_width + '×' + u.img_height + ' px' : '-');
 
         // 加载图像
         try {
-            const detail = await API.getPoiUnit(curTask.task_id, curTask.group_id, u.id);
+            // 使用并行预取的详情（如果有），否则发起 API 请求
+            const detail = (_prefetchedDetail && _prefetchedDetail._unitId === u.id)
+                ? _prefetchedDetail : await API.getPoiUnit(curTask.task_id, curTask.group_id, u.id);
+            _prefetchedDetail = null;  // 用完清除
             const imgEl = $('user-mainImg');
             imgEl.onload = function() {
+                hideImgLoading();
                 nW = this.naturalWidth;
                 nH = this.naturalHeight;
                 calcRect();
                 drawAll();
+                prefetchNextUnit(idx);
             };
             imgEl.src = detail.image_url;
 
@@ -525,7 +611,7 @@
                 };
             }
 
-            setText('user-vName', u.image);
+            setText('user-vName', shortFileName(u.image));
             const s = statusMap[String(u.id)];
             const polyN = (s && s.polygon_count != null) ? s.polygon_count : polygons.length;
             setText('user-polyCount', polyN);
@@ -540,13 +626,14 @@
                 nH = imgEl.naturalHeight;
                 calcRect();
                 drawAll();
+                prefetchNextUnit(idx);
             }
 
             setHint('点击画布添加顶点 · 双击闭合 · 右键取消');
 
             // 初始化地图
             if (u.lat != null && u.lng != null) {
-                UserMap.init({ lng: u.lng, lat: u.lat, name: u.name || u.image });
+                UserMap.init({ lng: u.lng, lat: u.lat, name: shortFileName(u.image) });
             } else {
                 UserMap.init({ lng: 116.397428, lat: 39.90923, name: '' });
             }
@@ -608,28 +695,81 @@
     }
 
     async function onSaveAndNext() {
-        if (!curUnit) return;
-        const saved = await savePOI();
-        if (saved === null) return;  // 未通过验证（存在未设定类型的多边形）
-        await jumpToNextPending();
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = savePOI();
+        var detailPromise = nextUnit
+            ? API.getPoiUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }  // 未通过验证
+        _imgLoading = false;  // 临时解除锁，selectUnit 内部会立即重新加锁
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function onPrev() {
-        if (!curUnit) return;
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
         const saved = await savePOI();
-        if (saved === null) return;
+        if (saved === null) { hideImgLoading(); return; }
+        _imgLoading = false;  // 临时解除锁
         if (curIdx > 0) {
             await selectUnit(curTask.units[curIdx - 1], curIdx - 1);
         } else {
+            hideImgLoading();
             toast('已是第一项');
         }
     }
 
     async function onNext() {
-        if (!curUnit) return;
-        const saved = await savePOI();
-        if (saved === null) return;
-        await jumpToNextPending();
+        if (!curUnit || _imgLoading) return;
+        showImgLoading();  // 立即显示加载中
+
+        // 本地查找下一个未完成的 unit
+        var nextUnit = null, nextIdx = -1;
+        for (var i = curIdx + 1; i < curTask.units.length; i++) {
+            var st = statusMap[String(curTask.units[i].id)];
+            if (!st || !st.done) { nextUnit = curTask.units[i]; nextIdx = i; break; }
+        }
+
+        // 并行：保存 + 下一个 unit 详情
+        var savePromise = savePOI();
+        var detailPromise = nextUnit
+            ? API.getPoiUnit(curTask.task_id, curTask.group_id, nextUnit.id)
+            : Promise.resolve(null);
+        var results = await Promise.all([savePromise, detailPromise]);
+        var saved = results[0];
+        _prefetchedDetail = results[1];
+        if (_prefetchedDetail) _prefetchedDetail._unitId = nextUnit ? nextUnit.id : null;
+
+        if (saved === null) { _prefetchedDetail = null; hideImgLoading(); return; }
+        _imgLoading = false;  // 临时解除锁
+        if (nextUnit) {
+            await selectUnit(nextUnit, nextIdx);
+        } else {
+            hideImgLoading();
+            renderUnitList();
+            highlightCurrent(curUnit ? curUnit.id : -1);
+        }
     }
 
     async function jumpToNextPending() {
@@ -642,6 +782,48 @@
         }
         renderUnitList();
         highlightCurrent(curUnit ? curUnit.id : -1);
+    }
+
+    // ===== 预加载下一个 unit 的图片（低优先级，不阻塞当前操作） =====
+    function _prefetchUnitDetail(taskId, groupId, unitId) {
+        return fetch('/api/poi_unit/' + encodeURIComponent(taskId) + '/' +
+            encodeURIComponent(groupId) + '/' + unitId, { credentials: 'include' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .catch(function() { return null; });
+    }
+
+    function prefetchNextUnit(currentIdx) {
+        if (_prefetchAbort) { _prefetchAbort = null; }
+
+        var nextIdx = -1;
+        for (var i = currentIdx + 1; i < curTask.units.length; i++) {
+            var s = statusMap[String(curTask.units[i].id)];
+            if (!s || !s.done) { nextIdx = i; break; }
+        }
+        if (nextIdx === -1 && currentIdx > 0) {
+            nextIdx = currentIdx - 1;
+        }
+        if (nextIdx === -1) return;
+
+        var nextUnit = curTask.units[nextIdx];
+        var doPrefetch = function() {
+            _prefetchUnitDetail(curTask.task_id, curTask.group_id, nextUnit.id)
+                .then(function(detail) {
+                    if (!detail || !detail.image_url) return;
+                    var link = document.createElement('link');
+                    link.rel = 'prefetch';
+                    link.href = detail.image_url;
+                    link.setAttribute('as', 'image');
+                    document.head.appendChild(link);
+                    setTimeout(function() { if (link.parentNode) link.parentNode.removeChild(link); }, 5000);
+                });
+        };
+
+        if (window.requestIdleCallback) {
+            _prefetchAbort = requestIdleCallback(doPrefetch, { timeout: 3000 });
+        } else {
+            _prefetchAbort = setTimeout(doPrefetch, 800);
+        }
     }
 
     function undoPoly() {
@@ -795,9 +977,11 @@
                 if (r.ok) {
                     if (r.role === 'admin') {
                         window.location.href = '/admin';
-                    } else if (r.task_type === 'judge') {
+                    } else if (r.task_type === 'judge' || r.task_type === 'judge_mask' || r.task_type === 'judge_shp') {
                         // judge 用户在 /poi 页面登录 → 跳转到 judge 页面
                         window.location.href = '/';
+                    } else if (r.task_type === 'hybrid') {
+                        window.location.href = '/hybrid';
                     } else {
                         window.location.reload();
                     }

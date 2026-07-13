@@ -194,6 +194,7 @@
                 dataset: document.getElementById('admin-task-dataset').value,
                 num_groups: parseInt(document.getElementById('admin-num-groups').value) || 1,
                 overlap_factor: parseInt(document.getElementById('admin-overlap').value) || 1,
+                task_type: document.getElementById('admin-task-type').value,
             };
             if (!payload.task_name || !payload.dataset) {
                 toast('请填写任务名称和 dataset');
@@ -240,7 +241,9 @@
         `).join('');
         const taskTypeLabel = task.task_type === 'poi'
             ? '<span style="color:#ffa726">[POI]</span>'
-            : '<span style="color:#4ecca3">[判读]</span>';
+            : (task.task_type === 'hybrid'
+                ? '<span style="color:#e94560">[Hybrid]</span>'
+                : '<span style="color:#4ecca3">[判读]</span>');
         const html = `
             <p style="color:#4ecca3;margin-bottom:10px">✓ 任务已创建（${task.task_id}）${taskTypeLabel}</p>
             <p style="color:#888;margin-bottom:10px;font-size:11px">总 unit: ${task.total_units} · 组数: ${task.num_groups} · 重叠: ${task.overlap_factor}</p>
@@ -266,14 +269,10 @@
             loading = true;
         }
 
-        // POI 任务隐藏重叠系数
-        if (isPoi) {
-            overlapContainer.style.display = 'none';
-        } else {
-            overlapContainer.style.display = '';
-        }
+        // 重叠系数对所有任务类型均适用
+        overlapContainer.style.display = '';
 
-        const effectiveOverlap = isPoi ? 1 : overlap;
+        const effectiveOverlap = overlap;
         const perGroup = totalUnits > 0 ? Math.ceil(totalUnits * effectiveOverlap / numGroups) : 0;
         document.getElementById('admin-calc-total').textContent = loading ? '...' : totalUnits;
         document.getElementById('admin-calc-per-group').textContent = loading ? '...' : perGroup;
@@ -291,7 +290,9 @@
             tbody.innerHTML = tasks.map(t => {
                 const typeBadge = t.task_type === 'poi'
                     ? '<span style="color:#ffa726;font-size:9px">[POI]</span>'
-                    : '<span style="color:#4ecca3;font-size:9px">[判读]</span>';
+                    : (t.task_type === 'hybrid'
+                        ? '<span style="color:#e94560;font-size:9px">[Hybrid]</span>'
+                        : '<span style="color:#4ecca3;font-size:9px">[判读]</span>');
                 return `
                 <tr>
                     <td><a class="admin-task-link" data-taskid="${t.task_id}" href="#">${t.task_name}</a> ${typeBadge}</td>
@@ -397,27 +398,40 @@
                 </div>
             </div>`;
 
-            // 一致性分析
+            // 一致性分析 — 三个维度
             const ag = d.agreement;
-            const agreementHtml = `
-            <div class="admin-detail-section">
-                <h4>交叉标注一致性</h4>
-                <div class="admin-agree-stats">
-                    <div class="admin-agree-card">
-                        <div class="val">${ag.total_overlap}</div>
-                        <div class="lbl">重叠 unit（被≥2组标注）</div>
+            const dims = [
+                { key: 'binary',         title: '是否判定',   icon: '🔍' },
+                { key: 'park_type',      title: '园区类型',   icon: '🏷️' },
+                { key: 'transport_modes',title: '运输方式',   icon: '🚛' },
+            ];
+
+            let agreementHtml = '<div class="admin-detail-section"><h4>交叉标注一致性</h4>';
+            let hasAnyData = false;
+            dims.forEach(dim => {
+                const a = ag[dim.key];
+                if (!a) return;
+                if (a.total_overlap === 0) {
+                    agreementHtml += `<p class="admin-detail-none" style="font-size:11px">${dim.icon} ${dim.title}：暂无重叠标注数据</p>`;
+                    return;
+                }
+                hasAnyData = true;
+                const consistentCls = a.inconsistent === 0 ? ' agree' : '';
+                agreementHtml += `
+                <div class="admin-agree-dim">
+                    <div class="admin-agree-dim-head">${dim.icon} ${dim.title}</div>
+                    <div class="admin-agree-stats mini">
+                        <div class="admin-agree-card"><div class="val">${a.total_overlap}</div><div class="lbl">重叠</div></div>
+                        <div class="admin-agree-card${consistentCls}"><div class="val">${a.consistent}</div><div class="lbl">一致</div></div>
+                        <div class="admin-agree-card${a.inconsistent > 0 ? ' disagree' : ''}"><div class="val">${a.inconsistent}</div><div class="lbl">不一致 ${a.inconsistent_ratio}%</div></div>
                     </div>
-                    <div class="admin-agree-card agree">
-                        <div class="val">${ag.consistent}</div>
-                        <div class="lbl">一致</div>
-                    </div>
-                    <div class="admin-agree-card disagree">
-                        <div class="val">${ag.inconsistent}</div>
-                        <div class="lbl">不一致（${ag.inconsistent_ratio}%）</div>
-                    </div>
-                </div>
-                ${ag.details.length > 0 ? renderDisagreeDetails(ag.details) : '<p class="admin-detail-none">' + (ag.total_overlap === 0 ? '暂无重叠标注数据' : '标注全部一致 ✓') + '</p>'}
-            </div>`;
+                    ${a.details.length > 0 ? renderDisagreeDetails(dim.key, dim.title, a.details) : '<p class="admin-detail-none" style="font-size:11px">标注全部一致 ✓</p>'}
+                </div>`;
+            });
+            if (!hasAnyData) {
+                agreementHtml += '<p class="admin-detail-none">暂无重叠标注数据（重叠系数为 1 或无标注数据）</p>';
+            }
+            agreementHtml += '</div>';
 
             body.innerHTML = metaHtml + progressHtml + agreementHtml;
 
@@ -426,18 +440,28 @@
         }
     }
 
-    function renderDisagreeDetails(details) {
+    function renderDisagreeDetails(dimKey, dimTitle, details) {
         const items = details.map(d => {
             const annRows = d.annotations.map(a => {
-                const rCls = a.result === '是' ? 'yes' : '';
-                return `<span class="di-row"><span class="di-gid">${a.group_id}</span><span class="di-result ${rCls}">${a.result}</span></span>`;
+                let valStr;
+                if (dimKey === 'binary') {
+                    valStr = a.value;
+                } else {
+                    valStr = Array.isArray(a.value) && a.value.length > 0
+                        ? a.value.join(', ') : '（无）';
+                }
+                const rCls = (dimKey === 'binary' && valStr === '是') ? 'yes' : '';
+                return `<span class="di-row"><span class="di-gid">${a.group_id}</span><span class="di-result ${rCls}">${valStr}</span></span>`;
             }).join('');
+            const extra = typeof d.component_id === 'number'
+                ? ` · 连通集 #${d.component_id}`
+                : '';
             return `<div class="admin-disagree-item">
-                <div class="di-head">📷 ${d.image} · 连通集 #${d.component_id}</div>
+                <div class="di-head">📷 ${d.image}${extra}</div>
                 ${annRows}
             </div>`;
         }).join('');
-        return `<div class="admin-disagree-list">${items}</div>`;
+        return `<details class="admin-disagree-details"><summary>查看 ${details.length} 处不一致</summary><div class="admin-disagree-list">${items}</div></details>`;
     }
 
     // ===== 删除任务 =====

@@ -92,13 +92,21 @@
                             </select>
                         </div>
                         <div class="admin-form-row">
+                            <label>任务类型</label>
+                            <select id="admin-task-type">
+                                <option value="auto">自动检测（默认）</option>
+                                <option value="hybrid">Hybrid（判读+POI两步标注）</option>
+                            </select>
+                            <small class="admin-tip-text">Hybrid 模式仅适用于判读数据集</small>
+                        </div>
+                        <div class="admin-form-row">
                             <label>组数 <span class="admin-req">*</span></label>
                             <input type="number" id="admin-num-groups" min="1" value="3" />
                         </div>
                         <div class="admin-form-row" id="admin-overlap-row">
                             <label>重叠系数 <span class="admin-req">*</span></label>
                             <input type="number" id="admin-overlap" min="1" value="1" />
-                            <small class="admin-tip-text">1=不重叠, N=每图被 N 个组标过（仅判读任务适用）</small>
+                            <small class="admin-tip-text">1=不重叠, N=每图被 N 个组标过（交叉验证）</small>
                         </div>
                     </div>
 

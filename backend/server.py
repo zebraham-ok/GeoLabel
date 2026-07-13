@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import string
 import threading
 import time
@@ -74,18 +75,80 @@ class MemoryCache:
                 self._expires.pop(k, None)
 
 
+# ==================== 图片 LRU 内存缓存（减少磁盘 I/O） ====================
+class ImageLRUCache:
+    """线程安全的 LRU 图片缓存，带内存上限（默认 512 MB）"""
+
+    def __init__(self, max_size_bytes: int = int(1.5 * 1024 * 1024 * 1024)):
+        self._max_size = max_size_bytes
+        self._store: Dict[str, bytes] = {}       # key -> 图片二进制
+        self._access: Dict[str, float] = {}       # key -> 最后访问时间戳
+        self._lock = threading.Lock()
+        self._current_size = 0
+
+    def get(self, key: str) -> Optional[bytes]:
+        with self._lock:
+            data = self._store.get(key)
+            if data is not None:
+                self._access[key] = time.time()
+            return data
+
+    def set(self, key: str, data: bytes) -> None:
+        with self._lock:
+            # 如果 key 已存在，先减去旧大小
+            old = self._store.get(key)
+            if old is not None:
+                self._current_size -= len(old)
+
+            self._store[key] = data
+            self._access[key] = time.time()
+            self._current_size += len(data)
+
+            # LRU 驱逐：从最久未访问的开始
+            while self._current_size > self._max_size and self._store:
+                lru_key = min(self._access, key=lambda k: self._access[k])
+                removed = self._store.pop(lru_key, None)
+                self._access.pop(lru_key, None)
+                if removed:
+                    self._current_size -= len(removed)
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "entries": len(self._store),
+                "size_mb": round(self._current_size / (1024 * 1024), 2),
+                "max_mb": round(self._max_size / (1024 * 1024), 2),
+            }
+
+
 # 不同数据的缓存 TTL
 task_cache = MemoryCache(default_ttl=60.0)       # task JSON 60 秒缓存
 status_cache = MemoryCache(default_ttl=15.0)      # unit 状态 15 秒缓存
 annotation_cache = MemoryCache(default_ttl=30.0)  # 标注内容 30 秒缓存
 poi_mem_cache = MemoryCache(default_ttl=3600.0)   # POI 结果 1 小时缓存
+image_cache = ImageLRUCache(max_size_bytes=int(1.5 * 1024 * 1024 * 1024))  # 图片 1.5GB LRU
 
 ADMIN_FILE = ACCOUNTS_DIR / "admin.json"
 USER_FILE = ACCOUNTS_DIR / "user.json"
 AMAP_CONFIG_FILE = ROOT / "amap_config.json"
+SERVER_CONFIG_FILE = ROOT / "server_config.json"
+
+# 并发写保护锁：防止 user.json 的 read-modify-write 竞态
+_user_file_lock = threading.Lock()
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="")
-app.secret_key = "judging_app_secret_key_change_me_in_production"
+
+# secret_key：生产环境从环境变量读取，开发环境使用固定值保证 session 不丢失
+_secret_key = os.environ.get("JUDGING_SECRET_KEY")
+if _secret_key:
+    app.secret_key = _secret_key
+elif os.environ.get("JUDGING_ENV") == "production":
+    _secret_key = secrets.token_hex(32)
+    app.secret_key = _secret_key
+    print(f"[INFO] 已生成随机 SECRET_KEY（服务重启后 session 将失效）")
+else:
+    app.secret_key = "judging_app_dev_secret_key"
+
 CORS(app, supports_credentials=True)
 
 # ==================== 工具函数 ====================
@@ -99,9 +162,20 @@ def load_json(path: Path, default: Any = None) -> Any:
         return default if default is not None else {}
 
 
-def save_json(path: Path, data: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def save_json(path: Path, data: Any, atomic: bool = True) -> None:
+    """原子写入 JSON：先写临时文件再 rename，避免并发读取到半写文件"""
+    if atomic:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(path)          # 原子 rename 覆盖
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def gen_password(length: int = 8) -> str:
@@ -274,16 +348,19 @@ def _parse_shp_filename(filename: str) -> Optional[dict]:
 
 # ==================== judge_shp: COCO 多边形处理 ====================
 _COCO_CACHE = {}  # path → {annotations_by_id, images_by_id}
+_coco_cache_lock = threading.Lock()
 
 
 def _load_coco_data(dataset_path: Path) -> Dict[str, Any]:
-    """加载 COCO JSON，返回 {annotations_by_id, images_by_id}（带缓存）"""
+    """加载 COCO JSON，返回 {annotations_by_id, images_by_id}（带缓存，线程安全）"""
     coco_files = list(dataset_path.glob("*_coco_clean.json")) + list(dataset_path.glob("*_coco.json"))
     if not coco_files:
         return {}
     json_path = str(coco_files[0])
-    if json_path in _COCO_CACHE:
-        return _COCO_CACHE[json_path]
+
+    with _coco_cache_lock:
+        if json_path in _COCO_CACHE:
+            return _COCO_CACHE[json_path]
 
     with open(coco_files[0], "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -292,7 +369,8 @@ def _load_coco_data(dataset_path: Path) -> Dict[str, Any]:
     img_by_id = {i["id"]: i for i in data.get("images", [])}
 
     result = {"annotations_by_id": ann_by_id, "images_by_id": img_by_id}
-    _COCO_CACHE[json_path] = result
+    with _coco_cache_lock:
+        _COCO_CACHE[json_path] = result
     return result
 
 
@@ -508,6 +586,20 @@ def poi_page():
     return html
 
 
+@app.route("/hybrid")
+def hybrid_page():
+    """Hybrid 任务页面（判读+POI 两步标注）"""
+    amap = _get_active_amap_key()
+    html_path = FRONTEND_DIR / "hybrid.html"
+    if not html_path.exists():
+        return "Hybrid 页面不存在", 404
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{ AMAP_KEY }}", amap["key"])
+    html = html.replace("{{ AMAP_SECURITY_CODE }}", amap["security_code"])
+    return html
+
+
 @app.route("/admin")
 def admin_page():
     return send_file(str(FRONTEND_DIR / "admin.html"))
@@ -628,16 +720,65 @@ def get_unit_status():
                 ann = json.load(fp)
             unit_id = ann.get("unit_id")
             if unit_id is not None:
-                status[str(unit_id)] = {
+                st = {
                     "done": True,
                     "result": ann.get("result"),
                     "updated_at": ann.get("updated_at"),
                 }
+                # hybrid 模式附加信息
+                if ann.get("has_park") is not None:
+                    st["has_park"] = ann["has_park"]
+                    polys = ann.get("polygons", [])
+                    st["polygon_count"] = len(polys)
+                    st["poi_labels"] = list(set(p["label"] for p in polys if p.get("label")))
+                    st["transport_modes"] = ann.get("transport_modes", [])
+                status[str(unit_id)] = st
     status_cache.set(cache_key, status)
     return jsonify(status)
 
 
-# ==================== 路由：图片 & Mask ====================
+# ==================== 路由：图片 & Mask（带 LRU 内存缓存 + 浏览器缓存头） ====================
+_IMAGE_CACHE_MAX_AGE = 86400  # 浏览器缓存 24 小时
+
+
+def _cached_send_file(filepath: Path, mimetype: str, cache_key: str):
+    """
+    带内存缓存 + 浏览器缓存头的 send_file：
+    1. 内存 LRU 缓存命中 → 直接返回 bytes
+    2. 磁盘读取 → 存入 LRU 缓存 → 返回
+    3. 浏览器 If-None-Match → 304 Not Modified
+    """
+    # ETag 必须 ASCII-safe：对含中文的缓存 key 做 URL 编码
+    etag_val = quote(cache_key, safe='')
+
+    # 内存缓存命中
+    cached = image_cache.get(cache_key)
+    if cached is not None:
+        # 检查浏览器缓存
+        req_etag = request.headers.get("If-None-Match", "")
+        if req_etag == etag_val:
+            from flask import Response
+            return Response(status=304)
+        from flask import Response
+        return Response(cached, mimetype=mimetype, headers={
+            "Cache-Control": f"public, max-age={_IMAGE_CACHE_MAX_AGE}, immutable",
+            "ETag": etag_val,
+        })
+
+    # 读取磁盘
+    try:
+        data = filepath.read_bytes()
+        image_cache.set(cache_key, data)
+    except (IOError, OSError):
+        return jsonify({"error": "read failed"}), 500
+
+    from flask import Response
+    return Response(data, mimetype=mimetype, headers={
+        "Cache-Control": f"public, max-age={_IMAGE_CACHE_MAX_AGE}, immutable",
+        "ETag": etag_val,
+    })
+
+
 @app.route("/api/image/<path:filename>")
 def serve_image(filename):
     """从 datasets_judge/<dataset>/ 读取原图（支持 img/ 子目录或 district 子目录）"""
@@ -648,12 +789,14 @@ def serve_image(filename):
     img_dir = DATASETS_JUDGE_DIR / dataset / "img"
     path = img_dir / os.path.basename(decoded)
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
+        ck = f"img:{dataset}:{os.path.basename(decoded)}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
 
     # 2. 尝试直接相对路径（judge_shp 类型，如 "延庆区/40.325_116.048_8452.jpg"）
     path = DATASETS_JUDGE_DIR / dataset / decoded
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/jpeg")
+        ck = f"img:{dataset}:{decoded}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/jpeg", ck)
 
     return jsonify({"error": "not found"}), 404
 
@@ -666,7 +809,8 @@ def serve_mask(filename):
     path = mask_dir / safe
     if not path.exists():
         return jsonify({"error": "not found"}), 404
-    return send_file(path.open("rb"), mimetype="image/png")
+    ck = f"mask:{dataset}:{safe}:{path.stat().st_mtime}"
+    return _cached_send_file(path, "image/png", ck)
 
 
 @app.route("/api/poi_image/<path:filename>")
@@ -674,17 +818,19 @@ def serve_poi_image(filename):
     """从 datasets_poi/<dataset>/ 读取 PNG；找不到时 fallback 到 datasets_judge/<dataset>/img/"""
     dataset = request.args.get("dataset", "")
     safe = os.path.basename(unquote(filename))
-    
+
     # 1. 先查 POI 目录
     path = DATASETS_POI_DIR / dataset / safe
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
-    
+        ck = f"poi:{dataset}:{safe}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
+
     # 2. Fallback：查 judge 目录下的 img 子目录
     path = DATASETS_JUDGE_DIR / dataset / "img" / safe
     if path.exists():
-        return send_file(path.open("rb"), mimetype="image/png")
-    
+        ck = f"poi_fb:{dataset}:{safe}:{path.stat().st_mtime}"
+        return _cached_send_file(path, "image/png", ck)
+
     return jsonify({"error": "not found"}), 404
 
 
@@ -726,13 +872,17 @@ def get_unit(task_id, group_id, unit_id):
         annotation_cache.set(anno_cache_key, existing)
 
     task_type = task.get("task_type", "judge")
-    if task_type == "judge_shp":
+    if task_type in ("judge_shp", "hybrid"):
+        # hybrid: 返回 mask_url 用于 Phase 1 的高亮区域+bbox 展示
         # judge_shp: 无 mask，返回多边形数据用于前端渲染
+        mask_url = None
+        if task_type == "hybrid" and unit.get("image"):
+            mask_url = f"/api/mask/{quote(unit['image'])}?dataset={task['dataset']}"
         return jsonify({
             "unit": unit,
             "image_url": f"/api/image/{quote(unit['image'])}?dataset={task['dataset']}",
-            "mask_url": None,
-            "task_type": "judge_shp",
+            "mask_url": mask_url,
+            "task_type": task_type,
             "polygon_pixels": unit.get("polygon_pixels"),
             "existing_annotation": existing,
         })
@@ -763,17 +913,34 @@ def submit_unit(task_id, group_id, unit_id):
         return jsonify({"error": "无权访问"}), 403
 
     data = request.get_json() or {}
-    record = {
-        "task_id": task_id,
-        "group_id": group_id,
-        "unit_id": unit_id,
-        "username": username,
-        "result": data.get("result"),                # 标注结果（如 "是"/"否"/"不确定"）
-        "park_type": data.get("park_type"),           # 园区类型
-        "transport_modes": data.get("transport_modes", []),  # 运输方式列表
-        "comment": data.get("comment", ""),
-        "updated_at": datetime.now().isoformat(),
-    }
+    task_type = task.get("task_type", "judge")
+
+    if task_type == "hybrid":
+        # hybrid 模式：两步标注
+        record = {
+            "task_id": task_id,
+            "group_id": group_id,
+            "unit_id": unit_id,
+            "username": username,
+            "has_park": data.get("has_park"),              # True/False
+            "result": data.get("result", "否"),            # "是"/"否"
+            "polygons": data.get("polygons", []),          # [{label, points: [[pctx,pcty],...]}]
+            "transport_modes": data.get("transport_modes", []),
+            "comment": data.get("comment", ""),
+            "updated_at": datetime.now().isoformat(),
+        }
+    else:
+        record = {
+            "task_id": task_id,
+            "group_id": group_id,
+            "unit_id": unit_id,
+            "username": username,
+            "result": data.get("result"),                # 标注结果（如 "是"/"否"/"不确定"）
+            "park_type": data.get("park_type"),           # 园区类型
+            "transport_modes": data.get("transport_modes", []),  # 运输方式列表
+            "comment": data.get("comment", ""),
+            "updated_at": datetime.now().isoformat(),
+        }
     out_dir = ANNOTATIONS_DIR / task_id / group_id
     out_dir.mkdir(parents=True, exist_ok=True)
     save_json(out_dir / f"unit_{unit_id:06d}.json", record)
@@ -1012,6 +1179,14 @@ def admin_amap_rotate():
     return jsonify({"ok": True, "new_key": info})
 
 
+@app.route("/api/admin/cache_stats", methods=["GET"])
+def admin_cache_stats():
+    """返回图片 LRU 缓存状态（管理端监控）"""
+    if session.get("role") != "admin":
+        return jsonify({"error": "无权限"}), 403
+    return jsonify(image_cache.stats())
+
+
 # ==================== 管理员：dataset 管理 ====================
 @app.route("/api/admin/datasets", methods=["GET"])
 def admin_list_datasets():
@@ -1151,9 +1326,10 @@ def admin_create_task():
       "task_name": "xxx",
       "dataset": "test",
       "num_groups": 3,
-      "overlap_factor": 2        # 1=不重叠, 2=每图被2组标 (POI 任务忽略)
+      "overlap_factor": 2,       # 1=不重叠, 2=每图被2组标
+      "task_type": "hybrid"      # 可选: "auto"/"judge"/"poi"/"hybrid"，默认 "auto" 自动检测
     }
-    系统根据 dataset 所在目录自动判定 task_type: "judge" 或 "poi"
+    系统根据 dataset 所在目录自动判定 task_type，也可手动指定为 hybrid
     """
     if session.get("role") != "admin":
         return jsonify({"error": "无权限"}), 403
@@ -1162,6 +1338,7 @@ def admin_create_task():
     dataset = (data.get("dataset") or "").strip()
     num_groups = int(data.get("num_groups") or 1)
     overlap_factor = int(data.get("overlap_factor") or 1)
+    req_task_type = (data.get("task_type") or "auto").strip()
 
     if not task_name or not dataset:
         return jsonify({"error": "缺少 task_name 或 dataset"}), 400
@@ -1171,6 +1348,12 @@ def admin_create_task():
     ds_type = _detect_dataset_type(dataset)
     if ds_type is None:
         return jsonify({"error": f"dataset {dataset} 不存在"}), 404
+
+    # 如果手动指定了 task_type 为 hybrid，且数据集是 judge 类型，则覆盖
+    if req_task_type == "hybrid" and ds_type in ("judge_mask", "judge_shp", "judge"):
+        ds_type = "hybrid"
+    elif req_task_type == "hybrid":
+        return jsonify({"error": "hybrid 模式仅支持判读数据集（datasets_judge）"}), 400
 
     # ===== judge_mask 任务：mask 连通集分析 =====
     if ds_type in ("judge_mask", "judge"):
@@ -1189,7 +1372,7 @@ def admin_create_task():
 
             info = analyze_connected_components(mask_file)
             for comp in info.get("components", []):
-                all_units.append({
+                unit_data = {
                     "id": len(all_units) + 1,
                     "image": mask_file.name,
                     "lat": lat,
@@ -1198,12 +1381,16 @@ def admin_create_task():
                     "bbox": comp["bbox"],
                     "area": comp["area"],
                     "centroid": comp["centroid"],
-                })
+                }
+                # hybrid 模式需要存储轮廓多边形
+                if ds_type == "hybrid":
+                    unit_data["polygon_pixels"] = comp.get("contour", [])
+                all_units.append(unit_data)
 
         groups_units = distribute_units_with_overlap(all_units, num_groups, overlap_factor)
 
-    # ===== judge_shp 任务：从 COCO JSON 加载多边形 =====
-    elif ds_type == "judge_shp":
+    # ===== judge_shp / hybrid 任务：从 COCO JSON 加载多边形 =====
+    elif ds_type in ("judge_shp", "hybrid"):
         if overlap_factor < 1 or overlap_factor > num_groups:
             return jsonify({"error": "重叠系数非法"}), 400
 
@@ -1216,8 +1403,8 @@ def admin_create_task():
 
     # ===== POI 任务：每个 PNG 是一个 unit =====
     else:
-        if overlap_factor > 1:
-            overlap_factor = 1  # POI 暂不支持重叠
+        if overlap_factor < 1 or overlap_factor > num_groups:
+            return jsonify({"error": "重叠系数非法"}), 400
 
         poi_dir = DATASETS_POI_DIR / dataset
         png_files = sorted(poi_dir.glob("*.png"))
@@ -1257,36 +1444,35 @@ def admin_create_task():
 
             all_units.append(unit)
 
-        # POI 任务简单轮询分配（每组均分）
-        groups_units = [[] for _ in range(num_groups)]
-        for i, unit in enumerate(all_units):
-            groups_units[i % num_groups].append(unit)
+        # POI 任务也使用交叉验证分配（与 Judge 一致）
+        groups_units = distribute_units_with_overlap(all_units, num_groups, overlap_factor)
 
     # ===== 生成账号 =====
     task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
-    users_data = load_json(USER_FILE, {"users": []})
-    created_groups = []
-    for i, units in enumerate(groups_units):
-        gid = f"g{i+1:02d}"
-        username = f"{task_id}_{gid}"
-        password = gen_password(8)
-        created_groups.append({
-            "group_id": gid,
-            "username": username,
-            "password": password,
-            "unit_count": len(units),
-            "units": units,
-            "progress": {"done": 0, "total": len(units)},
-        })
-        users_data.setdefault("users", []).append({
-            "username": username,
-            "password": password,
-            "task_id": task_id,
-            "group_id": gid,
-            "task_type": ds_type,
-            "created_at": datetime.now().isoformat(),
-        })
-    save_json(USER_FILE, users_data)
+    with _user_file_lock:  # 并发保护：防止多个管理员同时创建任务时 user.json 竞态
+        users_data = load_json(USER_FILE, {"users": []})
+        created_groups = []
+        for i, units in enumerate(groups_units):
+            gid = f"g{i+1:02d}"
+            username = f"{task_id}_{gid}"
+            password = gen_password(8)
+            created_groups.append({
+                "group_id": gid,
+                "username": username,
+                "password": password,
+                "unit_count": len(units),
+                "units": units,
+                "progress": {"done": 0, "total": len(units)},
+            })
+            users_data.setdefault("users", []).append({
+                "username": username,
+                "password": password,
+                "task_id": task_id,
+                "group_id": gid,
+                "task_type": ds_type,
+                "created_at": datetime.now().isoformat(),
+            })
+        save_json(USER_FILE, users_data)
 
     # ===== 持久化 task =====
     task = {
@@ -1359,7 +1545,9 @@ def admin_task_detail(task_id):
 
     # ---- 交叉标注一致性分析 ----
     # key = "image文件名|component_id" → 跨组匹配
+    # 三个维度分别计算：是否判定、园区类型、运输方式
     unit_ann_map: Dict[str, list] = {}
+    task_type = task.get("task_type", "judge")
 
     for group in task["groups"]:
         gid = group["group_id"]
@@ -1370,44 +1558,87 @@ def admin_task_detail(task_id):
             with open(ann_file, "r", encoding="utf-8") as fp:
                 ann = json.load(fp)
             unit_id = ann.get("unit_id")
-            result = ann.get("result", "")
-            if not result:
+
+            # ---- 统一提取三个维度的标注信息 ----
+            # 1) 是否判定
+            if task_type == "hybrid":
+                binary = "是" if ann.get("has_park") else "否"
+            elif task_type == "poi":
+                binary = "是" if ann.get("poi_labels") else "否"
+            else:
+                binary = ann.get("result", "")
+
+            if not binary:
                 continue
+
+            # 2) 园区类型（归一化为排序后的标签列表）
+            if task_type == "hybrid":
+                labels = sorted({p["label"] for p in ann.get("polygons", []) if p.get("label")})
+            elif task_type == "poi":
+                labels = sorted(ann.get("poi_labels", []))
+            else:
+                pt = ann.get("park_type", "")
+                labels = [pt] if pt else []
+
+            # 3) 运输方式（排序后的列表）
+            transport_modes = sorted(ann.get("transport_modes", []))
+
             # 找到该 unit 的 image + component_id
             unit_info = next((u for u in group.get("units", []) if u["id"] == unit_id), None)
             if not unit_info:
                 continue
-            key = f"{unit_info['image']}|{unit_info['component_id']}"
+            # POI / hybrid unit 没有 component_id，用 id 替代
+            comp_id = unit_info.get('component_id', unit_info['id'])
+            key = f"{unit_info['image']}|{comp_id}"
             if key not in unit_ann_map:
                 unit_ann_map[key] = []
             unit_ann_map[key].append({
                 "group_id": gid,
                 "unit_id": unit_id,
-                "result": result,
-                "park_type": ann.get("park_type", ""),
-                "transport_modes": ann.get("transport_modes", [])
+                "binary": binary,
+                "labels": labels,
+                "transport_modes": transport_modes,
             })
 
-    total_overlap = 0   # 被 ≥2 组标注的 unit 数
-    consistent = 0
-    inconsistent_details = []
+    # ---- 三个维度分别计算一致性 ----
+    def _compute_agreement(ann_by_key, field):
+        """对某个 field 计算跨组标注一致性"""
+        total = 0
+        consistent = 0
+        details = []
+        for key, ann_list in ann_by_key.items():
+            if len(ann_list) < 2:
+                continue
+            total += 1
+            vals = [a[field] for a in ann_list]
+            # binary 直接比较字符串；labels/modes 转为 tuple 后比较集合
+            if field == "binary":
+                equal = len(set(vals)) == 1
+            else:
+                equal = len(set(tuple(v) for v in vals)) == 1
+            if equal:
+                consistent += 1
+            else:
+                img, comp_id = key.split("|", 1)
+                details.append({
+                    "image": img,
+                    "component_id": int(comp_id) if comp_id.isdigit() else comp_id,
+                    "annotations": [
+                        {"group_id": a["group_id"], "value": a[field]}
+                        for a in ann_list
+                    ]
+                })
+        return {
+            "total_overlap": total,
+            "consistent": consistent,
+            "inconsistent": total - consistent,
+            "inconsistent_ratio": round((total - consistent) / total * 100, 1) if total > 0 else 0,
+            "details": details
+        }
 
-    for key, ann_list in unit_ann_map.items():
-        if len(ann_list) < 2:
-            continue
-        total_overlap += 1
-        results = [a["result"] for a in ann_list]
-        if len(set(results)) == 1:
-            consistent += 1
-        else:
-            img, comp_id = key.split("|", 1)
-            inconsistent_details.append({
-                "image": img,
-                "component_id": int(comp_id),
-                "annotations": ann_list
-            })
-
-    inconsistent = total_overlap - consistent
+    agreement_binary = _compute_agreement(unit_ann_map, "binary")
+    agreement_labels = _compute_agreement(unit_ann_map, "labels")
+    agreement_transport = _compute_agreement(unit_ann_map, "transport_modes")
 
     total_done = sum(g["progress"]["done"] for g in task["groups"])
     total_units = sum(g["unit_count"] for g in task["groups"])
@@ -1434,11 +1665,9 @@ def admin_task_detail(task_id):
             "pct": round(total_done / total_units * 100, 1) if total_units > 0 else 0
         },
         "agreement": {
-            "total_overlap": total_overlap,
-            "consistent": consistent,
-            "inconsistent": inconsistent,
-            "inconsistent_ratio": round(inconsistent / total_overlap * 100, 1) if total_overlap > 0 else 0,
-            "details": inconsistent_details
+            "binary": agreement_binary,
+            "park_type": agreement_labels,
+            "transport_modes": agreement_transport
         }
     })
 
@@ -1460,17 +1689,17 @@ def admin_delete_task(task_id):
     task_name = task.get("task_name", task_id)
 
     # 1. 从 user.json 中移除关联账号
-    users_data = load_json(USER_FILE, {"users": []})
-    original_count = len(users_data.get("users", []))
-    users_data["users"] = [
-        u for u in users_data.get("users", [])
-        if u.get("task_id") != task_id
-    ]
-    save_json(USER_FILE, users_data)
+    with _user_file_lock:  # 并发保护
+        users_data = load_json(USER_FILE, {"users": []})
+        original_count = len(users_data.get("users", []))
+        users_data["users"] = [
+            u for u in users_data.get("users", [])
+            if u.get("task_id") != task_id
+        ]
+        save_json(USER_FILE, users_data)
     removed_accounts = original_count - len(users_data.get("users", []))
 
     # 2. 删除标注目录
-    import shutil
     annot_dir = ANNOTATIONS_DIR / task_id
     if annot_dir.exists():
         shutil.rmtree(str(annot_dir))
@@ -1543,12 +1772,28 @@ def admin_download_accounts(task_id):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="物流园区判读系统")
-    parser.add_argument("--host", default="0.0.0.0", help="监听地址")
-    parser.add_argument("--port", type=int, default=8081, help="监听端口")
-    parser.add_argument("--prod", action="store_true", help="生产模式（使用 Waitress，否则用 Flask 多线程开发服务器）")
-    parser.add_argument("--threads", type=int, default=20, help="工作线程数（默认 20，适配 138 并发用户）")
-    parser.add_argument("--debug", action="store_true", help="开启 Flask debug 模式（仅开发）")
+    # 1. 先加载配置文件中的默认值
+    config_defaults: Dict[str, Any] = {}
+    if SERVER_CONFIG_FILE.exists():
+        try:
+            with open(SERVER_CONFIG_FILE, "r", encoding="utf-8") as f:
+                config_defaults = json.load(f)
+            print(f"[config] 已加载服务器配置文件: {SERVER_CONFIG_FILE}")
+        except Exception as e:
+            print(f"[warn] 服务器配置文件读取失败: {e}，使用内置默认值")
+
+    # 2. 命令行参数优先级高于配置文件
+    parser = argparse.ArgumentParser(
+        description="物流园区判读系统（配置文件: backend/server_config.json）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--host", default=config_defaults.get("host", "0.0.0.0"), help="监听地址")
+    parser.add_argument("--port", type=int, default=config_defaults.get("port", 8081), help="监听端口")
+    parser.add_argument("--threads", type=int, default=config_defaults.get("threads", 20), help="工作线程数")
+    parser.add_argument("--prod", action="store_true", default=config_defaults.get("prod", False),
+                        help="生产模式（使用 Waitress）")
+    parser.add_argument("--debug", action="store_true", default=config_defaults.get("debug", False),
+                        help="开启 Flask debug 模式（仅开发）")
     args = parser.parse_args()
 
     print(f"Datasets Judge: {DATASETS_JUDGE_DIR}")
