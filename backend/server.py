@@ -12,6 +12,7 @@ import shutil
 import string
 import threading
 import time
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -155,9 +156,10 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any, atomic: bool = True) -> None:
-    """原子写入 JSON：先写临时文件再 rename，避免并发读取到半写文件"""
+    """原子写入 JSON：用唯一临时文件 + rename，避免并发竞态"""
     if atomic:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # 每个线程/每次写入用独立临时文件，防止多线程 rename 同一文件
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:6]}.tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
