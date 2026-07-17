@@ -5,8 +5,6 @@ const UserMap = (function() {
     let map = null;
     let mainMarker = null;
     let searchMarkers = [];
-    let placeSearchReady = false;   // PlaceSearch 插件是否就绪
-
     const POI_TYPES = [
         ['物流园|物流园区',  '#ef5350', '#b71c1c'],
         ['仓库|仓储',        '#42a5f5', '#0d47a1'],
@@ -22,6 +20,7 @@ const UserMap = (function() {
     }
 
     function init(task) {
+
         if (!map) {
             map = new AMap.Map('user-map', {
                 center: [116.397428, 39.90923],
@@ -62,11 +61,17 @@ const UserMap = (function() {
     }
 
     function searchPOI(center) {
-        // 以 5 位小数精度（约 1m）作为缓存 key
-        const cacheKey = center[0].toFixed(5) + '_' + center[1].toFixed(5);
-        console.log('[POI] searchPOI, cacheKey:', cacheKey);
+        // 防护：确保坐标是有效数值
+        const lng = Number(center[0]), lat = Number(center[1]);
+        if (isNaN(lng) || isNaN(lat)) {
+            console.warn('[POI] Invalid center coordinates:', center);
+            return;
+        }
+        const cacheKey = lng.toFixed(5) + '_' + lat.toFixed(5);
+        console.log('[POI] searchPOI, center:', lng, lat, 'cacheKey:', cacheKey);
 
         // 先查后端缓存
+        const searchCenter = [lng, lat];
         fetch('/api/poi_cache?key=' + encodeURIComponent(cacheKey))
             .then(r => r.json())
             .then(data => {
@@ -77,28 +82,49 @@ const UserMap = (function() {
                 }
                 // 缓存未命中 → 高德搜索
                 console.log('[POI] Cache MISS, searching via Amap...');
-                ensurePlaceSearch(center, cacheKey);
+                ensurePlaceSearch(searchCenter, cacheKey);
             })
             .catch(() => {
                 // 网络错误时回退到高德搜索
                 console.log('[POI] Cache fetch error, fallback to Amap');
-                ensurePlaceSearch(center, cacheKey);
+                ensurePlaceSearch(searchCenter, cacheKey);
             });
     }
 
     function ensurePlaceSearch(center, cacheKey) {
-        if (placeSearchReady && typeof AMap.PlaceSearch !== 'undefined') {
+        // AMap SDK 未就绪时跳过
+        if (typeof AMap === 'undefined') {
+            console.warn('[POI] AMap SDK not loaded, cannot search');
+            return;
+        }
+        // PlaceSearch 已可用 → 直接搜索
+        if (typeof AMap.PlaceSearch !== 'undefined') {
             doSearch(center, cacheKey);
             return;
         }
-        AMap.plugin('AMap.PlaceSearch', function() {
-            placeSearchReady = true;
-            doSearch(center, cacheKey);
-        });
+        // 插件尚未就绪 → 异步加载（含超时兜底）
+        let pluginFired = false;
+        try {
+            AMap.plugin('AMap.PlaceSearch', function() {
+                if (!pluginFired) { pluginFired = true; doSearch(center, cacheKey); }
+            });
+        } catch (e) {
+            console.warn('[POI] AMap.plugin error:', e);
+        }
+        // 兜底：3 秒后如果插件回调仍未触发，再次尝试
+        setTimeout(function() {
+            if (!pluginFired && typeof AMap !== 'undefined' && typeof AMap.PlaceSearch !== 'undefined') {
+                pluginFired = true;
+                doSearch(center, cacheKey);
+            }
+        }, 3000);
     }
 
     function doSearch(center, cacheKey) {
-        console.log('[POI] doSearch, POI_TYPES:', POI_TYPES.length);
+        console.log('[POI] doSearch, center:', center, 'cacheKey:', cacheKey);
+        let firstResultLogged = false;
+        let hasAmapError = false;
+        let amapErrorMsg = null;
         const promises = POI_TYPES.map(t => {
             return new Promise(resolve => {
                 try {
@@ -109,6 +135,15 @@ const UserMap = (function() {
                     });
                     ps.searchNearBy(t[0], center, 10000, function(status, result) {
                         const pois = [];
+                        // 诊断日志：第一个搜索的原始返回
+                        if (!firstResultLogged) {
+                            firstResultLogged = true;
+                            console.log('[POI] Raw Amap response - status:', status, 'type:', typeof result);
+                            console.log('[POI] Raw result keys:', result ? Object.keys(result) : 'null');
+                            console.log('[POI] Raw result.poiList:', result ? result.poiList : 'null');
+                            console.log('[POI] Raw result.pois:', result ? result.pois : 'null');
+                            console.log('[POI] Raw result:', result);
+                        }
                         if (status === 'complete' && result && result.poiList) {
                             (result.poiList.pois || []).forEach(p => {
                                 pois.push({
@@ -120,10 +155,30 @@ const UserMap = (function() {
                                     type: t[0]
                                 });
                             });
+                        } else if (status === 'complete' && result && result.pois) {
+                            // v2.0 可能直接返回 result.pois 而非 result.poiList.pois
+                            console.log('[POI] Using result.pois directly (v2.0 format)');
+                            (result.pois || []).forEach(p => {
+                                pois.push({
+                                    name: p.name,
+                                    lng: p.location.lng,
+                                    lat: p.location.lat,
+                                    dotColor: t[1],
+                                    bgColor: t[2],
+                                    type: t[0]
+                                });
+                            });
+                        } else if (status === 'error') {
+                            hasAmapError = true;
+                            amapErrorMsg = typeof result === 'string' ? result : JSON.stringify(result);
+                            console.warn('[POI] Amap API error:', amapErrorMsg, 'keyword:', t[0]);
+                        } else if (status !== 'complete') {
+                            console.warn('[POI] search status not complete:', status, 'keyword:', t[0]);
                         }
                         resolve(pois);
                     });
                 } catch (e) {
+                    hasAmapError = true;
                     console.warn('[POI] search error:', t[0], e);
                     resolve([]);
                 }
@@ -145,6 +200,10 @@ const UserMap = (function() {
                     body: JSON.stringify({ key: cacheKey, pois: allPois })
                 }).catch(() => {});
                 fetch('/api/amap/reset_counter', { method: 'POST' }).catch(() => {});
+            } else if (hasAmapError) {
+                // API 错误（如配额耗尽）→ 不缓存空结果，避免永久污染
+                console.warn('[POI] Skipping empty-coord cache due to Amap API error');
+                showAmapErrorToast(amapErrorMsg);
             } else {
                 // 5 类全部为空 → 报告空结果（可能只是该区域真的没有 POI）
                 console.log('[POI] All 5 types returned 0 results, recording empty coord...');
@@ -160,7 +219,32 @@ const UserMap = (function() {
                         (data.empty_coords_count >= data.threshold ? ' → threshold reached, key rotated' : ' (not exhausted yet)'));
                 }).catch(() => {});
             }
+        }).catch(function(e) {
+            console.error('[POI] Promise.all failed:', e);
         });
+    }
+
+    function showAmapErrorToast(msg) {
+        // 移除已有 toast
+        const old = document.getElementById('amapErrorToast');
+        if (old) old.remove();
+
+        let hint = '高德 POI 搜索服务异常';
+        if (msg === 'USER_DAILY_QUERY_OVER_LIMIT') {
+            hint = '高德 API 今日配额已用完，POI 搜索暂不可用（明日自动恢复）';
+        }
+
+        const toast = document.createElement('div');
+        toast.id = 'amapErrorToast';
+        toast.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:2000;' +
+            'background:rgba(180,30,30,0.92);color:#fff;padding:8px 18px;border-radius:6px;' +
+            'font-size:13px;font-weight:bold;box-shadow:0 2px 12px rgba(0,0,0,0.5);pointer-events:none;' +
+            'white-space:nowrap';
+        toast.textContent = '⚠ ' + hint;
+        map.getContainer().appendChild(toast);
+
+        // 30 秒后自动消失
+        setTimeout(function() { if (toast.parentNode) toast.remove(); }, 30000);
     }
 
     function renderPOIMarker(p) {

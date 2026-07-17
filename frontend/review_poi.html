@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审核 POI</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/poi.css">
+<link rel="stylesheet" href="css/review.css">
+<script>window._AMapSecurityConfig={securityJsCode:'{{ AMAP_SECURITY_CODE }}'}</script>
+<script src="https://webapi.amap.com/maps?v=2.0&key={{ AMAP_KEY }}&plugin=AMap.ToolBar,AMap.Scale,AMap.MapType,AMap.PlaceSearch"></script>
+<script src="js/turf.min.js"></script>
+</head>
+<body>
+
+<div id="user-loading"><div>加载中...</div><div id="user-loadStatus" style="font-size:10px;color:#666"></div></div>
+<div id="user-toast"></div>
+
+<div class="user-topbar">
+    <h1 style="color:#7c4dff">审核 POI</h1>
+    <div class="user-sep"></div>
+    <div class="user-counter" id="user-counter">-</div>
+    <div class="user-tname" id="user-tname">-</div>
+    <span class="user-user-tag" id="user-username">未登录</span>
+    <div class="user-topbar-tool">
+        <span class="poi-toolbar-label">当前标签:</span>
+        <span class="poi-toolbar-active-label" id="poiToolbarActiveLabel">未选择</span>
+        <span class="poi-toolbar-count" id="poiToolbarCount">0 个框</span>
+        <span class="poi-toolbar-hint" id="poiToolbarHint">审核多边形标注</span>
+        <button class="poi-tool-btn" id="poiUndoBtn" title="撤销">&#x21A9; 撤销</button>
+        <button class="poi-tool-btn poi-tool-btn-danger" id="poiDelPolyBtn" title="删除">&#x2715; 删除选中</button>
+    </div>
+    <span class="user-help-btn" id="user-helpBtn">&#x2753;
+        <div class="user-help-tip">
+            <b>审核 POI 系统</b><br>
+            查看所有标注者的多边形，给出审核结论。<br>
+            采纳标注者多边形或自行绘制审核结果。<br><br>
+            <b>操作</b><br>
+            滚轮缩放 · 右键拖拽平移<br>
+            点击多边形选中 · 多选 Ctrl+点击<br>
+            右侧面板勾选标注者显示/隐藏多边形<br>
+            工具栏采纳/新增/取消采纳<br><br>
+            <b>快捷键</b><br>
+            <span class="hk">1-8</span>园区类型 <span class="hk">Q/W/E/R</span>运输方式<br>
+            <span class="hk">S</span>保存 <span class="hk">&#x21B5;</span>下一页<br>
+            <span class="hk">Del</span>取消采纳 <span class="hk">Esc</span>取消绘制<br>
+            <span class="hk">Ctrl+点击</span>多选
+        </div>
+    </span>
+    <button class="user-nbtn" id="user-logoutBtn" style="background:#7c4dff">退出</button>
+</div>
+
+<div class="user-main">
+    <div class="user-left-panel" id="user-leftPanel">
+        <div class="user-panel-header" id="user-taskHeader">加载中...</div>
+        <div class="user-task-tabs" id="user-taskTabs"></div>
+        <div class="user-unit-list" id="user-unitList"></div>
+    </div>
+    <div class="user-img-panel" id="user-imgPanel">
+        <!-- 多边形操作工具栏 -->
+        <div class="review-toolbar" id="review-toolbar">
+            <button class="review-tool-btn" id="tool-select-all" title="全选">&#x25A3; 全选</button>
+            <button class="review-tool-btn" id="tool-deselect-all" title="取消选择">&#x25A2; 取消</button>
+            <span style="color:#555;margin:0 4px;font-size:10px;line-height:28px">|</span>
+            <button class="review-tool-btn" id="tool-accept-result" title="采纳选中标注者多边形">&#x2714; 采纳</button>
+            <button class="review-tool-btn" id="tool-add-new" title="自行绘制新多边形">&#x2795; 新增</button>
+            <button class="review-tool-btn" id="tool-unaccept" title="取消采纳选中的审核结果多边形">&#x2716; 取消采纳</button>
+        </div>
+        <!-- 标注者侧边栏 -->
+        <div class="review-sidebar" id="review-sidebar">
+            <h4>标注者</h4>
+            <div id="review-annotator-checks"></div>
+        </div>
+        <div class="user-img-wrap" id="user-imgWrap">
+            <img id="user-mainImg" src="" alt="" draggable="false">
+            <canvas id="polyCanvas"></canvas>
+            <canvas id="reviewCanvas"></canvas>
+            <div class="img-loading-overlay hidden" id="img-loading">
+                <div class="img-loading-spinner"></div>
+                <div class="img-loading-text">加载中...</div>
+            </div>
+        </div>
+    </div>
+    <div class="user-map-panel">
+        <div id="user-map"></div>
+        <div class="user-map-hint">aux.xml 定位 | 周边 POI</div>
+    </div>
+</div>
+
+<div class="user-bottombar">
+    <div class="user-bb-cols">
+        <div class="user-bb-col user-bb-mid poi-label-col">
+            <div class="user-bb-caption">园区类型 <span class="user-bb-sub">审核多边形标签</span></div>
+            <div class="user-bb-bigbtns" id="poi-labelBtns">
+                <button class="user-bigbtn big-type" data-label="露天集装箱"><span class="bigbtn-glyph">1</span><span class="bigbtn-text">露天集装箱</span></button>
+                <button class="user-bigbtn big-type" data-label="露天散货"><span class="bigbtn-glyph">2</span><span class="bigbtn-text">露天散货</span></button>
+                <button class="user-bigbtn big-type" data-label="气液粮仓储罐"><span class="bigbtn-glyph">3</span><span class="bigbtn-text">气液粮仓储罐</span></button>
+                <button class="user-bigbtn big-type" data-label="批发市场"><span class="bigbtn-glyph">4</span><span class="bigbtn-text">批发市场</span></button>
+                <button class="user-bigbtn big-type" data-label="立体现代物流园"><span class="bigbtn-glyph">5</span><span class="bigbtn-text">立体现代物流园</span></button>
+                <button class="user-bigbtn big-type" data-label="传统集约物流园"><span class="bigbtn-glyph">6</span><span class="bigbtn-text">传统集约物流园</span></button>
+                <button class="user-bigbtn big-type" data-label="小物流聚集地"><span class="bigbtn-glyph">7</span><span class="bigbtn-text">小物流聚集地</span></button>
+                <button class="user-bigbtn big-type" data-label="码头/车站/机场"><span class="bigbtn-glyph">8</span><span class="bigbtn-text">码头/车站/机场</span></button>
+            </div>
+        </div>
+        <div class="user-bb-col user-bb-mid poi-trans-col">
+            <div class="user-bb-caption">运输方式 <span class="user-bb-sub">审核结果</span></div>
+            <div class="user-bb-bigbtns" id="poi-transBtns">
+                <button class="user-bigbtn big-trans on" data-mode="公路"><span class="bigbtn-glyph">&#x1F69B;</span><span class="bigbtn-text">公路</span><span class="bigbtn-key">Q</span></button>
+                <button class="user-bigbtn big-trans" data-mode="铁路"><span class="bigbtn-glyph">&#x1F684;</span><span class="bigbtn-text">铁路</span><span class="bigbtn-key">W</span></button>
+                <button class="user-bigbtn big-trans" data-mode="水路"><span class="bigbtn-glyph">&#x1F6A2;</span><span class="bigbtn-text">水路</span><span class="bigbtn-key">E</span></button>
+                <button class="user-bigbtn big-trans" data-mode="航空"><span class="bigbtn-glyph">&#x2708;</span><span class="bigbtn-text">航空</span><span class="bigbtn-key">R</span></button>
+            </div>
+        </div>
+        <div class="user-bb-col user-bb-right poi-action-col">
+            <div class="user-bb-caption">操作</div>
+            <div class="user-bb-bigbtns">
+                <button class="user-bigbtn big-save" id="user-saveBtn"><span class="bigbtn-glyph">&#x1F4BE;</span><span class="bigbtn-text">保存审核</span><span class="bigbtn-key">S</span></button>
+            </div>
+            <div class="user-bb-actions">
+                <button class="user-bigbtn big-nav" id="user-prevBtn"><span class="bigbtn-glyph">&#x25C0;</span><span class="bigbtn-text">上一项</span></button>
+                <button class="user-bigbtn big-nav" id="user-nextBtn"><span class="bigbtn-glyph">&#x25B6;</span><span class="bigbtn-text">下一项</span><span class="bigbtn-key">&#x21B5;</span></button>
+            </div>
+        </div>
+    </div>
+    <div class="user-info-row">
+        <span><span class="user-l">图片:</span><span class="user-v" id="user-vName">-</span></span>
+        <span><span class="user-l">坐标:</span><span class="user-v" id="user-vCoord">-</span></span>
+        <span><span class="user-l">状态:</span><span class="user-v" id="user-vStatus">-</span></span>
+        <span><span class="user-l">多边形:</span><span class="user-v" id="user-polyCount">0</span></span>
+        <span><span class="user-l">运输方式:</span><span class="user-v" id="user-vTrans">-</span></span>
+        <span class="user-bb-keys">快捷键: <b>1-8</b> 标签 · <b>Q/W/E/R</b> 运输 · <b>S</b> 保存 · <b>&#x21B5;</b> 下一页 · <b>&#x2190; &#x2192;</b> 翻页 · <b>Ctrl+Click</b> 多选 · <b>Esc</b> 取消绘制 · <b>Del</b> 取消采纳</span>
+    </div>
+    <div class="user-info-row" id="review-selection-info" style="background:#1a2a3e;padding:3px 10px;min-height:22px;font-size:11px;color:#ccc;"></div>
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/map.js"></script>
+<script src="js/review_poi.js"></script>
+</body>
+</html>

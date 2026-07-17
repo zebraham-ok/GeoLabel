@@ -51,3 +51,45 @@ def hybrid_page():
 @pages_bp.route("/admin")
 def admin_page():
     return send_file(str(FRONTEND_DIR / "admin.html"))
+
+
+@pages_bp.route("/review_judge")
+def review_judge_page():
+    """审核-判读页面"""
+    amap = get_active_amap_key()
+    html_path = FRONTEND_DIR / "review_judge.html"
+    if not html_path.exists():
+        return "审核判读页面不存在", 404
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{ AMAP_KEY }}", amap["key"])
+    html = html.replace("{{ AMAP_SECURITY_CODE }}", amap["security_code"])
+    return html
+
+
+@pages_bp.route("/review_poi")
+def review_poi_page():
+    """审核-POI页面"""
+    amap = get_active_amap_key()
+    html_path = FRONTEND_DIR / "review_poi.html"
+    if not html_path.exists():
+        return "审核POI页面不存在", 404
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{ AMAP_KEY }}", amap["key"])
+    html = html.replace("{{ AMAP_SECURITY_CODE }}", amap["security_code"])
+    return html
+
+
+@pages_bp.route("/review_hybrid")
+def review_hybrid_page():
+    """审核-Hybrid页面"""
+    amap = get_active_amap_key()
+    html_path = FRONTEND_DIR / "review_hybrid.html"
+    if not html_path.exists():
+        return "审核Hybrid页面不存在", 404
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{ AMAP_KEY }}", amap["key"])
+    html = html.replace("{{ AMAP_SECURITY_CODE }}", amap["security_code"])
+    return html

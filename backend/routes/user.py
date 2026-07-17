@@ -33,7 +33,7 @@ def get_user_tasks():
             for group in task.get("groups", []):
                 if group["username"] == username:
                     task_id = task["task_id"]
-                    gid = group["group_id"]
+                    gid = group.get("group_id") or group.get("reviewer_id", "unknown")
                     total = len(group.get("units", []))
                     done = 0
                     annot_dir = ANNOTATIONS_DIR / task_id / gid

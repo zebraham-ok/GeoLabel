@@ -288,11 +288,18 @@
                 return;
             }
             tbody.innerHTML = tasks.map(t => {
-                const typeBadge = t.task_type === 'poi'
-                    ? '<span style="color:#ffa726;font-size:9px">[POI]</span>'
-                    : (t.task_type === 'hybrid'
-                        ? '<span style="color:#e94560;font-size:9px">[Hybrid]</span>'
-                        : '<span style="color:#4ecca3;font-size:9px">[判读]</span>');
+                const tt = t.task_type || 'judge';
+                const isReview = tt.endsWith('_review');
+                const typeBadges = {
+                    'poi': '<span style="color:#ffa726;font-size:9px">[POI]</span>',
+                    'hybrid': '<span style="color:#e94560;font-size:9px">[Hybrid]</span>',
+                    'judge': '<span style="color:#4ecca3;font-size:9px">[判读]</span>',
+                    'poi_review': '<span style="color:#7c4dff;font-size:9px">[POI-审核]</span>',
+                    'hybrid_review': '<span style="color:#7c4dff;font-size:9px">[Hybrid-审核]</span>',
+                    'judge_review': '<span style="color:#7c4dff;font-size:9px">[判读-审核]</span>',
+                };
+                const typeBadge = typeBadges[tt] || '<span style="color:#4ecca3;font-size:9px">[判读]</span>';
+                const reviewBtn = isReview ? '' : `<button class="admin-btn admin-btn-review admin-btn-small admin-review-btn" data-taskid="${t.task_id}" data-taskname="${t.task_name}" data-tasktype="${tt}">审核</button>`;
                 return `
                 <tr>
                     <td><a class="admin-task-link" data-taskid="${t.task_id}" href="#">${t.task_name}</a> ${typeBadge}</td>
@@ -304,6 +311,7 @@
                     <td>
                         <a class="admin-btn admin-btn-ghost admin-btn-small" href="${API.adminDownloadUrl(t.task_id)}" target="_blank">下载</a>
                         <button class="admin-btn admin-btn-ghost admin-btn-small admin-detail-btn" data-taskid="${t.task_id}">详情</button>
+                        ${reviewBtn}
                         <button class="admin-btn admin-btn-danger admin-btn-small admin-delete-btn" data-taskid="${t.task_id}" data-taskname="${t.task_name}">删除</button>
                     </td>
                 </tr>
@@ -314,6 +322,14 @@
                 el.addEventListener('click', function(e) {
                     e.preventDefault();
                     showTaskDetail(this.dataset.taskid);
+                });
+            });
+
+            // 绑定审核按钮
+            tbody.querySelectorAll('.admin-review-btn').forEach(el => {
+                el.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    showReviewModal(this.dataset.taskid, this.dataset.taskname, this.dataset.tasktype);
                 });
             });
 
@@ -470,6 +486,8 @@
         const body = document.getElementById('admin-confirm-body');
         const okBtn = document.getElementById('admin-confirm-ok-btn');
 
+        document.getElementById('admin-confirm-title').textContent = '⚠️ 确认删除';
+
         body.innerHTML = `<p style="font-size:14px;color:#fff;text-align:center;margin:16px 0;">你确定要删除任务「<strong style="color:#e94560">${taskName}</strong>」吗？</p>
             <p style="font-size:11px;color:#888;text-align:center">该操作将同时删除所有关联账号、标注数据，不可恢复。</p>`;
 
@@ -477,6 +495,8 @@
 
         // 移除旧的监听器并绑定新的
         const newBtn = okBtn.cloneNode(true);
+        newBtn.className = 'admin-btn admin-btn-danger';
+        newBtn.textContent = '确认删除';
         okBtn.parentNode.replaceChild(newBtn, okBtn);
         newBtn.addEventListener('click', async function() {
             modal.style.display = 'none';
@@ -488,6 +508,108 @@
                 }
             } catch (e) {
                 toast('删除失败: ' + e.message);
+            }
+        });
+    }
+
+    // ===== 创建审核任务 =====
+    function showReviewModal(taskId, taskName, taskType) {
+        const isPoly = (taskType === 'poi' || taskType === 'hybrid');
+        const modal = document.getElementById('admin-confirm-modal');
+        const body = document.getElementById('admin-confirm-body');
+        const okBtn = document.getElementById('admin-confirm-ok-btn');
+
+        var ratioInputs = '';
+        if (isPoly) {
+            ratioInputs = `
+                <div class="admin-form-row" style="margin-bottom:10px;">
+                    <label>免审比例</label>
+                    <input type="number" id="review-exemption" min="0.5" max="1" step="0.05" value="0.6"
+                        style="background:#16213e;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:4px;width:100%;" />
+                    <small style="color:#888;font-size:9px;">结果投票多数比例超过此值才免审（0.5-1），否则进入审核队列</small>
+                </div>
+                <div class="admin-form-row" style="margin-bottom:10px;">
+                    <label>最低重叠比</label>
+                    <input type="number" id="review-overlap" min="0" max="1" step="0.05" value="0.5"
+                        style="background:#16213e;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:4px;width:100%;" />
+                    <small style="color:#888;font-size:9px;">多边形对 IoU 低于此值则需审核（0-1）</small>
+                </div>
+            `;
+        } else {
+            ratioInputs = `
+                <div class="admin-form-row" style="margin-bottom:10px;">
+                    <label>免审比例</label>
+                    <input type="number" id="review-exemption" min="0.5" max="1" step="0.05" value="0.6"
+                        style="background:#16213e;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:4px;width:100%;" />
+                    <small style="color:#888;font-size:9px;">选项得票率超过此值则免审（0.5-1）</small>
+                </div>
+            `;
+        }
+
+        body.innerHTML = `
+            <h4 style="color:#4ecca3;text-align:center;margin-bottom:12px;">创建审核任务</h4>
+            <p style="color:#fff;text-align:center;margin-bottom:8px;">原任务：<strong>${taskName}</strong>（${taskType}）</p>
+            <div class="admin-form-row" style="margin-bottom:10px;">
+                <label>审核员数量</label>
+                <input type="number" id="review-num-reviewers" min="1" max="10" value="2"
+                    style="background:#16213e;border:1px solid #333;color:#fff;padding:6px 10px;border-radius:4px;width:100%;" />
+            </div>
+            ${ratioInputs}
+            <p id="review-create-msg" style="color:#e94560;text-align:center;font-size:11px;min-height:16px;"></p>
+        `;
+
+        document.getElementById('admin-confirm-title').textContent = isPoly ? '📐 创建审核任务' : '📊 创建审核任务';
+        modal.style.display = 'flex';
+
+        const newBtn = okBtn.cloneNode(true);
+        newBtn.textContent = '创建审核任务';
+        newBtn.className = 'admin-btn admin-btn-primary';
+        okBtn.parentNode.replaceChild(newBtn, okBtn);
+
+        newBtn.addEventListener('click', async function() {
+            const numReviewers = parseInt(document.getElementById('review-num-reviewers').value) || 2;
+            const exemptionRatio = parseFloat(document.getElementById('review-exemption').value) || 0.6;
+            const msgEl = document.getElementById('review-create-msg');
+
+            newBtn.disabled = true;
+            newBtn.textContent = '创建中...';
+            msgEl.textContent = '';
+
+            try {
+                const payload = { num_reviewers: numReviewers, exemption_ratio: exemptionRatio };
+                if (isPoly) {
+                    const overlapRatio = parseFloat(document.getElementById('review-overlap').value) || 0.5;
+                    payload.min_overlap_ratio = overlapRatio;
+                }
+                const r = await API.adminCreateReview(taskId, payload);
+                if (r.ok) {
+                    modal.style.display = 'none';
+                    const reviewerRows = r.review_task.groups.map(g => `
+                        <div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px dashed #333">
+                            <div class="acc-gid">审核员 ${g.reviewer_id}</div>
+                            <div><span class="acc-key">账号:</span><span class="acc-val">${g.username}</span></div>
+                            <div><span class="acc-key">密码:</span><span class="acc-val">${g.password}</span></div>
+                            <div><span class="acc-key">标量:</span><span class="acc-val">${g.unit_count} 个</span></div>
+                        </div>
+                    `).join('');
+                    const stats = r.stats;
+                    const html = `
+                        <p style="color:#4ecca3;margin-bottom:10px">✓ 审核任务已创建（${r.review_task.task_id}）</p>
+                        <p style="color:#ffa726;margin-bottom:10px;font-size:11px">
+                            原重叠条目: ${stats.total_original_overlaps} ·
+                            自动免审: ${stats.auto_resolved} ·
+                            需要审核: ${stats.needs_review}
+                        </p>
+                        <div class="admin-account-list">${reviewerRows}</div>
+                    `;
+                    showModal('审核任务创建成功', html, API.adminDownloadUrl(r.review_task.task_id));
+                    loadTasks();
+                }
+            } catch (e) {
+                msgEl.textContent = '创建失败: ' + e.message;
+            } finally {
+                newBtn.disabled = false;
+                newBtn.textContent = '创建审核任务';
             }
         });
     }

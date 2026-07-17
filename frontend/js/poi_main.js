@@ -43,6 +43,9 @@
         window.location.href = '/admin';
         return;
     }
+    if (me.task_type === 'judge_review') { window.location.href = '/review_judge'; return; }
+    if (me.task_type === 'poi_review') { window.location.href = '/review_poi'; return; }
+    if (me.task_type === 'hybrid_review') { window.location.href = '/review_hybrid'; return; }
     $('user-username').textContent = me.username;
     $('user-role').textContent = me.role;
 

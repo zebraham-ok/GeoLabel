@@ -1,0 +1,173 @@
+/* ============ 审核系统共享样式 ============ */
+
+/* 审核页面影像与画布：绝对定位（JS 动态设置 left/top/width/height），保持对齐并跟随缩放/平移 */
+#user-mainImg {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    user-select: none;
+    max-width: none;
+    max-height: none;
+}
+#reviewCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 11;
+    pointer-events: none;
+}
+#polyCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 10;
+    pointer-events: auto;
+    cursor: default;
+}
+/* mask/bbox canvas 也跟随 JS 定位 */
+#user-maskCanvas, #user-bboxCanvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+}
+#user-maskCanvas { z-index: 5; }
+#user-bboxCanvas { z-index: 6; }
+
+/* 审核侧边栏（标注者勾选框） */
+.review-sidebar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 100;
+    background: rgba(26, 26, 46, 0.92);
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    padding: 8px 10px;
+    min-width: 160px;
+    max-height: 50%;
+    overflow-y: auto;
+}
+.review-sidebar h4 {
+    color: #4ecca3;
+    font-size: 11px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid #333;
+    padding-bottom: 4px;
+    cursor: move;
+    user-select: none;
+}
+.review-sidebar label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 10px;
+    color: #ccc;
+    cursor: pointer;
+}
+.review-sidebar label:hover { color: #fff; }
+.review-sidebar .annotator-color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.review-sidebar input[type="checkbox"] {
+    accent-color: #4ecca3;
+}
+
+/* 多边形操作工具栏（POI/Hybrid 审核页） */
+.review-toolbar {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 100;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+.review-tool-btn {
+    padding: 5px 10px;
+    background: rgba(26, 26, 46, 0.9);
+    border: 1px solid #444;
+    color: #ccc;
+    border-radius: 4px;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.12s;
+}
+.review-tool-btn:hover {
+    border-color: #4ecca3;
+    color: #fff;
+}
+.review-tool-btn.active {
+    background: #4ecca3;
+    border-color: #4ecca3;
+    color: #111;
+    font-weight: bold;
+}
+
+/* 按钮上的比例标签 */
+.bigbtn-ratio {
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    color: #888;
+    background: rgba(0,0,0,0.4);
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+}
+
+/* 标注者数据面板（底部信息区的扩展） */
+.annotator-data-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 3px 0;
+    border-top: 1px dashed #333;
+    margin-top: 3px;
+}
+.annotator-data-item {
+    font-size: 8px;
+    color: #888;
+    background: rgba(255,255,255,0.05);
+    padding: 2px 6px;
+    border-radius: 3px;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.annotator-data-item .ad-gid {
+    font-weight: bold;
+    margin-right: 3px;
+}
+
+/* 审核结果高亮（大红 Crimson） */
+.review-decided {
+    box-shadow: 0 0 12px rgba(220, 20, 60, 0.6) !important;
+}
+
+/* 滚动条（侧边栏） */
+.review-sidebar::-webkit-scrollbar {
+    width: 3px;
+}
+.review-sidebar::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 1px;
+}
+
+/* 矩形框选元素 */
+#select-rect {
+    position: absolute;
+    border: 2px dashed #4ecca3;
+    background: rgba(78, 204, 163, 0.12);
+    pointer-events: none;
+    z-index: 50;
+    display: none;
+}

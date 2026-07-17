@@ -16,7 +16,7 @@ from flask import Blueprint, jsonify, request, send_file, session
 
 from config import (
     DATASETS_JUDGE_DIR, DATASETS_POI_DIR, TASKS_DIR, ANNOTATIONS_DIR,
-    USER_FILE, AMAP_EXHAUSTION_THRESHOLD,
+    USER_FILE, AMAP_EXHAUSTION_THRESHOLD, POI_IMAGE_EXTENSIONS,
 )
 from cache import task_cache, status_cache, image_cache, _user_file_lock
 from utils import admin_required, load_json, save_json, gen_password
@@ -108,12 +108,13 @@ def admin_list_datasets():
         for d in sorted(DATASETS_POI_DIR.iterdir()):
             if not d.is_dir():
                 continue
-            png_count = len(list(d.glob("*.png")))
-            aux_count = len(list(d.glob("*.png.aux.xml")))
+            poi_images = [f for f in d.iterdir()
+                          if f.is_file() and f.suffix.lower() in POI_IMAGE_EXTENSIONS]
+            aux_count = len(list(d.glob("*.aux.xml")))
             datasets.append({
                 "name": d.name,
                 "type": "poi",
-                "img_count": png_count,
+                "img_count": len(poi_images),
                 "mask_count": aux_count,
             })
 
@@ -170,23 +171,26 @@ def admin_analyze_dataset(name):
         })
     else:
         poi_dir = DATASETS_POI_DIR / name
-        png_files = sorted(poi_dir.glob("*.png"))
+        img_files = sorted(
+            f for f in poi_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in POI_IMAGE_EXTENSIONS
+        )
         per_image = []
         total_units = 0
-        for png_file in png_files:
-            aux_file = Path(str(png_file) + ".aux.xml")
+        for img_file in img_files:
+            aux_file = Path(str(img_file) + ".aux.xml")
             geo = parse_aux_xml(aux_file) if aux_file.exists() else None
             if geo:
                 total_units += 1
                 per_image.append({
-                    "image": png_file.name,
+                    "image": img_file.name,
                     "num_units": 1,
                     "lat": round(geo["originY"] + geo["pixelHeight"] * 1000, 6),
                     "lng": round(geo["originX"] + geo["pixelWidth"] * 1000, 6),
                 })
             else:
                 total_units += 1
-                per_image.append({"image": png_file.name, "num_units": 1})
+                per_image.append({"image": img_file.name, "num_units": 1})
 
         return jsonify({
             "dataset": name,
@@ -274,24 +278,27 @@ def admin_create_task():
             return jsonify({"error": "重叠系数非法"}), 400
 
         poi_dir = DATASETS_POI_DIR / dataset
-        png_files = sorted(poi_dir.glob("*.png"))
+        img_files = sorted(
+            f for f in poi_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in POI_IMAGE_EXTENSIONS
+        )
 
         all_units = []
-        for png_file in png_files:
-            name_no_ext = png_file.stem
-            aux_file = Path(str(png_file) + ".aux.xml")
+        for img_file in img_files:
+            name_no_ext = img_file.stem
+            aux_file = Path(str(img_file) + ".aux.xml")
             geo = parse_aux_xml(aux_file) if aux_file.exists() else None
 
             unit = {
                 "id": len(all_units) + 1,
-                "image": png_file.name,
+                "image": img_file.name,
                 "name": name_no_ext,
                 "lat": None,
                 "lng": None,
             }
             if geo:
                 try:
-                    img = cv2.imdecode(np.fromfile(str(png_file), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+                    img = cv2.imdecode(np.fromfile(str(img_file), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
                     if img is not None:
                         h, w = img.shape[:2]
                         center_lat = geo["originY"] + geo["pixelHeight"] * h / 2

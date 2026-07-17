@@ -64,6 +64,8 @@ a:hover { text-decoration: underline; }
 .admin-btn-small { padding: 4px 10px; font-size: 10px; }
 .admin-btn-danger { background: #ef5350; color: #fff; }
 .admin-btn-danger:hover { background: #d32f2f; }
+.admin-btn-review { background: #7c4dff; color: #fff; }
+.admin-btn-review:hover { background: #651fff; }
 
 /* ============ 顶部 ============ */
 .admin-app { display: flex; flex-direction: column; height: 100%; }

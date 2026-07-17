@@ -7,7 +7,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, Response
 from urllib.parse import quote, unquote
 
-from config import DATASETS_JUDGE_DIR, DATASETS_POI_DIR, IMAGE_CACHE_MAX_AGE
+from config import DATASETS_JUDGE_DIR, DATASETS_POI_DIR, IMAGE_CACHE_MAX_AGE, MIME_BY_EXT
 from cache import image_cache
 
 images_bp = Blueprint("images", __name__)
@@ -78,18 +78,22 @@ def serve_mask(filename):
 
 @images_bp.route("/api/poi_image/<path:filename>")
 def serve_poi_image(filename):
-    """从 datasets_poi/<dataset>/ 读取 PNG；找不到时 fallback 到 judge/img/"""
+    """从 datasets_poi/<dataset>/ 读取图片；找不到时 fallback 到 judge/img/"""
     dataset = request.args.get("dataset", "")
     safe = os.path.basename(unquote(filename))
 
     path = DATASETS_POI_DIR / dataset / safe
     if path.exists():
+        ext = Path(safe).suffix.lower()
+        mime = MIME_BY_EXT.get(ext, "image/png")
         ck = f"poi:{dataset}:{safe}:{path.stat().st_mtime}"
-        return _cached_send_file(path, "image/png", ck)
+        return _cached_send_file(path, mime, ck)
 
     path = DATASETS_JUDGE_DIR / dataset / "img" / safe
     if path.exists():
+        ext = Path(safe).suffix.lower()
+        mime = MIME_BY_EXT.get(ext, "image/png")
         ck = f"poi_fb:{dataset}:{safe}:{path.stat().st_mtime}"
-        return _cached_send_file(path, "image/png", ck)
+        return _cached_send_file(path, mime, ck)
 
     return jsonify({"error": "not found"}), 404

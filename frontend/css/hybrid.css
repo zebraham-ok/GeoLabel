@@ -17,6 +17,22 @@
     grid-template-columns: repeat(2, 1fr);
     gap: 4px;
 }
+/* 运输方式按钮缩小，避免与园区类型重叠 */
+.hybrid-trans-col .user-bigbtn {
+    min-height: 30px;
+    padding: 2px 2px;
+}
+.hybrid-trans-col .user-bigbtn .bigbtn-glyph {
+    font-size: 14px;
+}
+.hybrid-trans-col .user-bigbtn .bigbtn-text {
+    font-size: 10px;
+}
+.hybrid-trans-col .user-bigbtn .bigbtn-key {
+    font-size: 9px;
+    right: 2px;
+    bottom: 1px;
+}
 
 /* -- 操作栏 -- */
 .poi-action-col .user-bb-bigbtns {
@@ -34,7 +50,7 @@
 }
 /* -- 底栏 Phase 2 布局（3栏：类型 + 运输 + 操作）-- */
 .user-bb-cols.hybrid-phase2-layout {
-    grid-template-columns: minmax(320px, 2fr) minmax(180px, 1fr) minmax(140px, 0.8fr);
+    grid-template-columns: minmax(360px, 3fr) minmax(110px, 0.75fr) minmax(120px, 0.7fr);
 }
 
 /* ============ 多边形绘制画布（复用 POI） ============ */

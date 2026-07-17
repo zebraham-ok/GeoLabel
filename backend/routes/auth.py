@@ -52,4 +52,5 @@ def current_user():
         "logged_in": True,
         "username": session["user"],
         "role": session.get("role", "user"),
+        "task_type": session.get("task_type", ""),
     })
